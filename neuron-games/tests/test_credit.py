@@ -82,13 +82,19 @@ def test_removal_and_random_masks() -> None:
 
 
 @needs_impl
+def test_load_credit_disabled(tmp_path) -> None:
+    with pytest.raises(ReferenceError):
+        hist = {"epoch_credit_per_neuron": [[[0.0, 1.0], None], [[2.0, 3.0], None]]}
+        (tmp_path / "results.json").write_text(json.dumps({"meta": {"potential": {"credit": "none"}}, "history": hist}))
+        c = load_credit(tmp_path)
+
+@needs_impl
 def test_load_credit(tmp_path) -> None:
     hist = {"epoch_credit_per_neuron": [[[0.0, 1.0], None], [[2.0, 3.0], None]]}
-    (tmp_path / "results.json").write_text(json.dumps({"history": hist}))
+    (tmp_path / "results.json").write_text(json.dumps({"meta": {"potential": {"credit": "true"}}, "history": hist}))
     c = load_credit(tmp_path)
     torch.testing.assert_close(c[0], torch.tensor([2.0, 3.0]))
     assert c[1] is None
-
 
 @needs_impl
 def test_stability_and_sparsity() -> None:

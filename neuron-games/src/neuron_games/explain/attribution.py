@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-
+import json
 
 def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | None]:
     """Per-layer credit vectors [N_l] for one epoch (default: last) of a run.
@@ -22,7 +22,32 @@ def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | Non
     convert lists to float tensors, keep None for uncredited layers. Raise a
     clear error if the run had credit disabled.
     """
-    raise NotImplementedError("William: load_credit (explain/attribution.py)")
+    path = Path(f"{run_dir}/results.json")
+    results = None
+    epoch_idx = epoch
+
+    with open(path, "r") as file:
+        results = json.load(file)
+
+    if results["meta"]["potential"]["credit"] == "none":
+        raise ReferenceError("This run had credit disabled.")
+
+    total_epochs = len(results["history"]["epoch_credit_per_neuron"])
+
+    if epoch_idx == -1:
+        epoch_idx = total_epochs - 1
+
+    if epoch_idx > (total_epochs - 1):
+        raise IndexError("Selected epoch_idx {epoch_idx} is out of range of total number of epochs {total_epochs}.")
+
+    credit_data = results["history"]["epoch_credit_per_neuron"][epoch_idx]
+
+    credit = [None for layer in credit_data]
+    for index, layer in enumerate(credit_data):
+        if layer is None:
+            continue
+        credit[index] = torch.tensor(layer, dtype=torch.float32)
+    return credit
 
 
 def removal_masks(credit: torch.Tensor, k: int, largest: bool = True) -> torch.Tensor:
