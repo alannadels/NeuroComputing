@@ -11,7 +11,7 @@ from .base import TermContext, TermOutput, signals_from_autograd
 
 def regularizer_value(weights: list[torch.Tensor]) -> torch.Tensor:
     """R(W) = sum_l ||W_l||_F^2. Differentiable scalar."""
-    raise NotImplementedError("Joohyun: regularizer_value (regularizer.py)")
+    return sum((w * w).sum() for w in weights)
 
 
 def regularizer_term(ctx: TermContext) -> TermOutput:
