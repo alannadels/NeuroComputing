@@ -29,7 +29,8 @@ from .base import CreditContext, CreditResult
 
 def shapley_values(G: torch.Tensor, prev_delta_w: torch.Tensor) -> torch.Tensor:
     """phi_i = sum_j G_ij * dW_ij for one layer. [N_l, fan_in] x2 -> [N_l]."""
-    raise NotImplementedError("William: shapley_values (eligibility_shapley.py)")
+    phi = torch.einsum('ij,ij->i', G, prev_delta_w)
+    return phi
 
 
 def credit_gains(phi: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
@@ -42,6 +43,7 @@ def credit_gains(phi: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
     the ablation will tune. Must return finite gains for phi == 0 everywhere
     (all gains exactly 1).
     """
+
     raise NotImplementedError("William: credit_gains (eligibility_shapley.py)")
 
 
