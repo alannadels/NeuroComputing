@@ -91,16 +91,18 @@ class NGRunConfig:
 
     # --- E: metabolic + barrier homeostasis (proposal §6) ---
     metabolic: str = "none"               # none | basic (eq. 15)
-    c_s: float = 1e-3                     # per-spike cost
-    c_u: float = 1e-3                     # membrane^2 cost
+    # c_s / c_u / u bounds picked by the mu sweep + follow-ups (a)-(c), 3 seeds;
+    # see docs/experiments/. mu * c_s >= 3e-3 silences the network.
+    c_s: float = 10.0                     # per-spike cost
+    c_u: float = 0.0                      # membrane^2 cost (symmetric pull lifts inhibited outputs)
     c_w: float = 1e-4                     # synaptic maintenance cost
     p_w: float = 2.0                      # exponent p in |w|^p
     barrier: str = "none"                 # none | quadratic (penalty + projection) | log (eq. 17)
     alpha_bar: float = 1e-2               # alpha in E = E_met + alpha * E_bar (eq. 18)
     w_min: float = -1.0
     w_max: float = 1.0
-    u_min: float = -2.0
-    u_max: float = 2.0
+    u_min: float = -30.0                  # [-2, 2] left 70% of hidden membranes outside
+    u_max: float = 30.0
     barrier_t0: float = 1.0               # log-barrier extension: t = t0 * barrier_mu ** epoch
     barrier_mu: float = 1.5
     mu: float = 1e-4
