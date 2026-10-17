@@ -53,9 +53,16 @@ def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | Non
 def removal_masks(credit: torch.Tensor, k: int, largest: bool = True) -> torch.Tensor:
     """[N_l] mask with the k highest-credit (largest=True) or lowest-credit
     neurons set to 0 and the rest 1. Ties broken by index for determinism."""
-    raise NotImplementedError("William: removal_masks (explain/attribution.py)")
+    val, idx = torch.topk(credit, k, largest=largest)
+    mask = torch.ones_like(credit, dtype=torch.float32)
+    mask.scatter_(-1, idx, 0.0)
+    return mask
 
 
 def random_masks(n: int, k: int, generator: torch.Generator) -> torch.Tensor:
     """[n] mask with k uniformly random neurons set to 0 (control for faithfulness)."""
-    raise NotImplementedError("William: random_masks (explain/attribution.py)")
+    mask = torch.ones(n, dtype=torch.float32)
+    if k > 0:
+        indices = torch.randperm(n, generator=generator)[:k]
+        mask[indices] = 0.0
+    return mask
