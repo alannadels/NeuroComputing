@@ -42,6 +42,23 @@ def test_metabolic_term_signals() -> None:
 
 
 @needs_impl
+def test_metabolic_term_mem_and_weight_signals_all_layers() -> None:
+    # Closed-form local derivatives of eq. 15 on every layer:
+    #   dE/ds = c_s / B,  dE/du = 2 c_u u / B,  dE/dW = c_w * p * |W|^(p-1) * sign(W)
+    cfg = _cfg(c_s=0.2, c_u=0.3, c_w=0.05, p_w=3.0)
+    ctx = small_ctx(cfg)
+    out = metabolic_term(ctx)
+    B = ctx.rec.spk[0].shape[1]
+    assert len(out.signals) == ctx.n_layers >= 2
+    for l in range(ctx.n_layers):
+        sig = out.signals[l]
+        torch.testing.assert_close(sig.spike, torch.full_like(ctx.rec.spk[l], 0.2 / B))
+        torch.testing.assert_close(sig.mem, 2 * 0.3 * ctx.rec.mem[l] / B)
+        w = ctx.weights[l]
+        torch.testing.assert_close(sig.weight, 0.05 * 3.0 * w.abs() ** 2 * w.sign())
+
+
+@needs_impl
 def test_phi_t_continuous_and_finite() -> None:
     for t in (0.5, 1.0, 5.0, 50.0):
         z0 = -1.0 / t ** 2
@@ -65,6 +82,41 @@ def test_barrier_zero_grad_deep_inside_and_pushes_back_outside(form) -> None:
     if form == "quadratic":
         (g_in,) = torch.autograd.grad(barrier_value(spk, mem, w_in, cfg, epoch=0), w_in)
         assert g_in.abs().max() == 0
+
+
+@needs_impl
+def test_phi_t_gradient_continuous_and_nan_free() -> None:
+    # C^1 at the switch (slope t on both sides), and no NaN gradient leaks
+    # from the unselected log branch for z >= 0.
+    for t in (0.5, 1.0, 5.0, 50.0):
+        z0 = -1.0 / t ** 2
+        z = torch.tensor([z0 * (1 + 1e-6), z0 * (1 - 1e-6), 0.0, 3.0, -10.0], dtype=torch.float64,
+                         requires_grad=True)
+        (g,) = torch.autograd.grad(phi_t(z, t).sum(), z)
+        assert torch.isfinite(g).all()
+        assert float(g[0]) == pytest.approx(t, rel=1e-3)
+        assert float(g[1]) == pytest.approx(t, rel=1e-3)
+        assert float(g[3]) == pytest.approx(t)
+        assert float(g[4]) == pytest.approx(1.0 / (10.0 * t))
+
+
+@needs_impl
+def test_log_barrier_finite_on_infeasible_membranes_and_tightens() -> None:
+    # Recorded membranes routinely leave (u_min, u_max) = (-2, 2) (|u| ~ 40 seen
+    # in training); the log form must stay finite with finite signals.
+    cfg = _cfg(barrier="log", barrier_t0=1.0, barrier_mu=1.5)
+    w = [torch.full((2, 3), 0.5, requires_grad=True)]
+    mem = [torch.tensor([-40.0, -2.0, 0.0, 2.0, 40.0]).reshape(5, 1, 1).expand(5, 2, 1)
+           .clone().requires_grad_(True)]
+    spk = [torch.zeros(5, 2, 1)]
+    v = barrier_value(spk, mem, w, cfg, epoch=0)
+    gw, gu = torch.autograd.grad(v, [w[0], mem[0]])
+    assert torch.isfinite(v) and torch.isfinite(gw).all() and torch.isfinite(gu).all()
+    assert float(gu[0, 0, 0]) < 0 < float(gu[-1, 0, 0])   # pushes both ends back inside
+    # t = t0 * mu**epoch grows, so the outside penalty steepens over epochs.
+    later = barrier_value(spk, [m.detach() for m in mem], [x.detach() for x in w],
+                          cfg, epoch=5)
+    assert float(later) > float(v.detach())
 
 
 @needs_impl

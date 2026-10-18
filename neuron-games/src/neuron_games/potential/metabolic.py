@@ -20,7 +20,11 @@ def metabolic_value(spk: list[torch.Tensor], mem: list[torch.Tensor],
     the weight term has no batch axis. Coefficients: cfg.c_s, cfg.c_u,
     cfg.c_w, exponent cfg.p_w. Must return a differentiable scalar.
     """
-    raise NotImplementedError("Joohyun: metabolic_value (metabolic.py)")
+    batch = spk[0].shape[1]
+    spike_cost = sum(s.sum() for s in spk) / batch            # c_s term: spikes per sample
+    mem_cost = sum((u * u).sum() for u in mem) / batch        # c_u term: sustained excitation
+    weight_cost = sum(w.abs().pow(cfg.p_w).sum() for w in weights)  # c_w term: no batch axis
+    return cfg.c_s * spike_cost + cfg.c_u * mem_cost + cfg.c_w * weight_cost
 
 
 def metabolic_term(ctx: TermContext) -> TermOutput:

@@ -14,6 +14,8 @@ Two forms (cfg.barrier):
 """
 from __future__ import annotations
 
+import math
+
 import torch
 
 from .base import TermContext, TermOutput, signals_from_autograd
@@ -27,7 +29,13 @@ def phi_t(z: torch.Tensor, t: float) -> torch.Tensor:
     (C^1 at the switch point; matches Kervadec eq. 7.) Must not produce
     inf/NaN for any finite z, including z > 0.
     """
-    raise NotImplementedError("Joohyun: phi_t (barrier.py)")
+    switch = 1.0 / (t * t)
+    # torch.where evaluates both branches, and a NaN in the unselected one
+    # still poisons the gradient. Clamping -z at 1/t^2 leaves the selected
+    # log branch unchanged (there -z >= 1/t^2) and keeps the other finite.
+    log_branch = -torch.log((-z).clamp(min=switch)) / t
+    linear_branch = t * z - math.log(switch) / t + 1.0 / t
+    return torch.where(z <= -switch, log_branch, linear_branch)
 
 
 def barrier_value(spk: list[torch.Tensor], mem: list[torch.Tensor],
@@ -41,7 +49,22 @@ def barrier_value(spk: list[torch.Tensor], mem: list[torch.Tensor],
     Membrane part: sum over neurons and time, mean over batch (base.py
     convention). Bounds: cfg.w_min/w_max/u_min/u_max.
     """
-    raise NotImplementedError("Joohyun: barrier_value (barrier.py)")
+    if cfg.barrier == "quadratic":
+        def box(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+            return (torch.relu(x - hi) ** 2 + torch.relu(lo - x) ** 2).sum()
+    elif cfg.barrier == "log":
+        t = cfg.barrier_t0 * cfg.barrier_mu ** epoch
+
+        def box(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+            # -log(x - lo) -> phi_t(lo - x),  -log(hi - x) -> phi_t(x - hi)
+            return (phi_t(lo - x, t) + phi_t(x - hi, t)).sum()
+    else:
+        raise ValueError(f"barrier_value called with barrier={cfg.barrier!r}")
+
+    batch = mem[0].shape[1]
+    weight_part = sum(box(w, cfg.w_min, cfg.w_max) for w in weights)
+    mem_part = sum(box(u, cfg.u_min, cfg.u_max) for u in mem) / batch
+    return weight_part + mem_part
 
 
 @torch.no_grad()
@@ -53,7 +76,15 @@ def project_(weights: list[torch.Tensor], cfg) -> None:
          (e.g. 1e-6 * (w_max - w_min)) so the barrier stays finite.
     `weights` are the live nn.Parameter tensors: modify with .clamp_().
     """
-    raise NotImplementedError("Joohyun: project_ (barrier.py)")
+    if cfg.barrier == "quadratic":
+        lo, hi = cfg.w_min, cfg.w_max
+    elif cfg.barrier == "log":
+        margin = 1e-6 * (cfg.w_max - cfg.w_min)
+        lo, hi = cfg.w_min + margin, cfg.w_max - margin
+    else:
+        raise ValueError(f"project_ called with barrier={cfg.barrier!r}")
+    for w in weights:
+        w.clamp_(lo, hi)
 
 
 def barrier_term(ctx: TermContext) -> TermOutput:
