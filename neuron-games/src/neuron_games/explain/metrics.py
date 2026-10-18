@@ -31,12 +31,12 @@ def masked_accuracy(net, loader, cfg, device, masks: list[torch.Tensor | None]) 
     return correct / total if total > 0 else 0.0
 
 
-def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor, layer: int,
+def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor,
                        ks: list[int], n_random: int = 5, seed: int = 0) -> dict:
     """Removing the highest-credit neurons should hurt most (Neuron Shapley eval).
 
     For each k in ks: accuracy after removing the top-k, the bottom-k, and
-    k random neurons (mean +- std over n_random draws) of `layer`.
+    k random neurons (mean +- std over n_random draws) of provided layer based on credit.
     Return {"k": ks, "top": [...], "bottom": [...], "random_mean": [...],
     "random_std": [...], "full": acc_without_removal}.
     """
@@ -72,8 +72,8 @@ def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor, layer: in
             rand_acc = masked_accuracy(net, loader, cfg, device, random_masks(credit.numel(), k, generator))
             rand_accs.append(rand_acc)
 
-        random_means.append(float(torch.mean(rand_accs)))
-        random_stds.append(float(torch.std(rand_accs)) if n_random > 1 else 0.0)
+        random_means.append(float(np.mean(rand_accs)))
+        random_stds.append(float(np.std(rand_accs)) if n_random > 1 else 0.0)
 
     return {
         "k": ks,
