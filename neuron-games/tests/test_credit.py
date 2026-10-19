@@ -18,6 +18,7 @@ from neuron_games.game import NeuronGame
 from neuron_games.modulator.base import CreditContext
 from neuron_games.modulator.eligibility_shapley import (EligibilityShapley, credit_gains,
                                                         shapley_values)
+from neuron_games.modulator.shapley_taylor import ShapleyTaylor
 from neuron_games.train import build_optimizer
 
 
@@ -170,3 +171,71 @@ def test_faithfulness_curve_passes_per_layer_mask_list() -> None:
             "target layer must get the per-neuron mask tensor"
         for other in masks[1:]:
             assert other is None, "non-target layers must be None"
+
+
+def _st_ctx(cfg, G: list[torch.Tensor],
+            prev_dW: list[torch.Tensor | None]) -> CreditContext:
+    return CreditContext(G=G, prev_delta_w=prev_dW, task_grads=G,
+                         layers=[0], cfg=cfg)
+
+
+def test_shapley_taylor_skips_first_window_no_prior_action() -> None:
+    """Window 0 has no prev_delta_w, so phi and gains must both be None
+    (uniform credit, same as EligibilityShapley)."""
+    cfg = NGRunConfig.for_condition("ng_full_st2", device="cpu")
+    st = ShapleyTaylor(cfg)
+    G = [torch.randn(3, 4), torch.randn(2, 3)]
+    res = st(_st_ctx(cfg, G, prev_dW=[None, None]))
+    assert res.phi[0] is None and res.gains[0] is None
+
+
+def test_shapley_taylor_without_cached_g_falls_back_to_eligibility_shapley() -> None:
+    """Fresh instance (or resumed mid-training) with prev_delta_w but no
+    cached G^(n-1): phi must drop the FD curvature term and reduce to the
+    singleton eligibility_shapley value. This is the fallback the docstring
+    promises; in normal training it cannot occur because window 0 primes the
+    cache for every layer whether credited or not."""
+    torch.manual_seed(2)
+    cfg = NGRunConfig.for_condition("ng_full_st2", device="cpu")
+    st = ShapleyTaylor(cfg)
+    G = [torch.randn(5, 4), torch.randn(2, 5)]
+    dW = [torch.randn(5, 4), torch.randn(2, 5)]
+    res = st(_st_ctx(cfg, G, prev_dW=dW))
+    expected = shapley_values(G[0], dW[0])
+    torch.testing.assert_close(res.phi[0], expected)
+
+
+def test_shapley_taylor_third_window_adds_fd_curvature_term() -> None:
+    """Once G^(n-1) is cached, phi^ST = <G, dW> + 1/2 <dW, delta_G> with
+    delta_G = G^(n) - G^(n-1). Verifies the Theorem-1 closed form (Dhamdhere
+    2020) for the quadratic surrogate with FD curvature."""
+    torch.manual_seed(3)
+    cfg = NGRunConfig.for_condition("ng_full_st2", device="cpu")
+    st = ShapleyTaylor(cfg)
+    N, F = 6, 5
+    G_prev = torch.randn(N, F)
+    dW_prev = torch.randn(N, F)
+    st(_st_ctx(cfg, [G_prev, torch.randn(2, N)], prev_dW=[None, None]))
+    st(_st_ctx(cfg, [G_prev, torch.randn(2, N)], prev_dW=[dW_prev, None]))
+
+    G_now = torch.randn(N, F)
+    dW_now = torch.randn(N, F)
+    res = st(_st_ctx(cfg, [G_now, torch.randn(2, N)], prev_dW=[dW_now, None]))
+
+    delta_G = G_now - G_prev
+    expected = (shapley_values(G_now, dW_now)
+                + 0.5 * torch.einsum('ij,ij->i', dW_now, delta_G))
+    torch.testing.assert_close(res.phi[0], expected)
+
+
+def test_shapley_taylor_skips_uncredited_layers() -> None:
+    """Mirror of test_eligibility_shapley_skips_uncredited_layers: only layers
+    listed in ctx.layers receive phi/gains."""
+    cfg = NGRunConfig.for_condition("ng_full_st2", device="cpu")
+    st = ShapleyTaylor(cfg)
+    G = [torch.randn(3, 4), torch.randn(2, 3)]
+    dW = [torch.randn(3, 4), torch.randn(2, 3)]
+    st(_st_ctx(cfg, G, prev_dW=[None, None]))
+    res = st(_st_ctx(cfg, G, prev_dW=dW))
+    assert res.phi[0] is not None and res.gains[0] is not None
+    assert res.phi[1] is None and res.gains[1] is None
