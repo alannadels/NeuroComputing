@@ -13,7 +13,7 @@ from helpers import needs_impl, small_net
 
 from neuron_games.config import NGRunConfig
 from neuron_games.explain.attribution import load_credit, random_masks, removal_masks
-from neuron_games.explain.metrics import sparsity, stability
+from neuron_games.explain.metrics import faithfulness_curve, sparsity, stability
 from neuron_games.game import NeuronGame
 from neuron_games.modulator.base import CreditContext
 from neuron_games.modulator.eligibility_shapley import (EligibilityShapley, credit_gains,
@@ -104,3 +104,69 @@ def test_stability_and_sparsity() -> None:
     dense, sparse = torch.ones(100), torch.zeros(100)
     sparse[0] = 1.0
     assert sparsity(sparse)["gini"] > sparsity(dense)["gini"]
+
+
+def test_net_mask_targets_specified_layer() -> None:
+    """FCSNN.forward(masks=[m0, m1]) must index masks per layer, not broadcast
+    a bare 1-D tensor as scalars (model.py:160). Silencing all hidden neurons
+    must zero the output spikes; silencing all output neurons must zero them
+    directly. Both targeted-at-layer-0 and targeted-at-layer-1 should kill the
+    output; a bare 1-D tensor would scale by one scalar instead."""
+    torch.manual_seed(0)
+    net = small_net(n_in=12, n_hidden=9, n_out=4)
+    x = (torch.rand(15, 5, 12) < 0.4).float()
+
+    zero_hidden: list[torch.Tensor | None] = [torch.zeros(9), None]
+    zero_output: list[torch.Tensor | None] = [None, torch.zeros(4)]
+
+    with torch.no_grad():
+        rec_free = net(x)
+        rec_h = net(x, masks=zero_hidden)
+        rec_o = net(x, masks=zero_output)
+
+    assert rec_free.out_spk.sum() > 0, "sanity: free net should produce spikes"
+    assert rec_h.out_spk.sum() == 0, "silencing all hidden neurons must zero output spikes"
+    assert rec_o.out_spk.sum() == 0, "silencing all output neurons must zero output spikes"
+
+
+def test_faithfulness_curve_passes_per_layer_mask_list() -> None:
+    """faithfulness_curve must wrap each one-layer mask into a per-layer list
+    ([m, None]) before handing it to masked_accuracy — otherwise net.forward
+    indexes `masks[0]` as a scalar (model.py:160) and silently scales entire
+    layers by one scalar instead of per-neuron. This test spies on the masks
+    the function hands downstream."""
+    from neuron_games.explain import metrics as metrics_mod
+
+    n_in, n_hidden, n_out = 12, 9, 4
+    net = small_net(n_in=n_in, n_hidden=n_hidden, n_out=n_out)
+    cfg = NGRunConfig.for_condition("three_factor",
+                                    n_in=n_in, n_hidden=n_hidden, n_out=n_out,
+                                    device="cpu", num_steps=15, encoding="direct")
+    data = torch.rand(4, n_in)
+    targets = torch.randint(0, n_out, (4,))
+    loader = [(data, targets)]
+
+    captured: list = []
+    original = metrics_mod.masked_accuracy
+
+    def spy(net, loader, cfg, device, masks):
+        captured.append(masks)
+        return original(net, loader, cfg, device, masks)
+
+    metrics_mod.masked_accuracy = spy
+    try:
+        faithfulness_curve(net, loader, cfg, device="cpu",
+                           credit=torch.arange(n_hidden, dtype=torch.float32),
+                           layer=0, ks=[2], n_random=1, seed=0)
+    finally:
+        metrics_mod.masked_accuracy = original
+
+    assert captured, "faithfulness_curve must call masked_accuracy at least once"
+    assert captured[0] is None, "first call is the no-mask baseline"
+    for masks in captured[1:]:
+        assert isinstance(masks, list), f"masks must be a list, got {type(masks).__name__}"
+        assert len(masks) == len(net.layers), "one entry per net layer"
+        assert torch.is_tensor(masks[0]) and masks[0].shape == (n_hidden,), \
+            "target layer must get the per-neuron mask tensor"
+        for other in masks[1:]:
+            assert other is None, "non-target layers must be None"

@@ -74,7 +74,8 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
     
     # Compute faithfulness curve
     ks = [0, 8, 16, 32, 64]
-    faith_results = faithfulness_curve(net, test_loader, cfg, device, last_credit, ks=ks)
+    faith_results = faithfulness_curve(net, test_loader, cfg, device, last_credit,
+                                       layer=layer_idx, ks=ks)
     
     # Compute stability between last two epochs (if available)
     stab_results = {}
