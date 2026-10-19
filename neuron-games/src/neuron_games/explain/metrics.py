@@ -31,15 +31,26 @@ def masked_accuracy(net, loader, cfg, device, masks: list[torch.Tensor | None]) 
     return correct / total if total > 0 else 0.0
 
 
-def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor,
+def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor, layer: int,
                        ks: list[int], n_random: int = 5, seed: int = 0) -> dict:
     """Removing the highest-credit neurons should hurt most (Neuron Shapley eval).
 
     For each k in ks: accuracy after removing the top-k, the bottom-k, and
-    k random neurons (mean +- std over n_random draws) of provided layer based on credit.
+    k random neurons (mean +- std over n_random draws) of `layer` based on credit.
     Return {"k": ks, "top": [...], "bottom": [...], "random_mean": [...],
     "random_std": [...], "full": acc_without_removal}.
+
+    The caller passes a one-layer credit vector; this function wraps each
+    generated single-layer mask into a per-layer list that targets `layer`
+    (None for every other layer), as FCSNN.forward expects.
     """
+    n_layers = len(net.layers)
+
+    def _as_mask_list(m: torch.Tensor) -> list[torch.Tensor | None]:
+        ms: list[torch.Tensor | None] = [None] * n_layers
+        ms[layer] = m.to(device)
+        return ms
+
     # 1. Baseline accuracy without any removal
     full_acc = masked_accuracy(net, loader, cfg, device, None)
 
@@ -57,11 +68,13 @@ def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor,
             continue
 
         # 2. Top-k removal (highest credit neurons set to 0)
-        top_acc = masked_accuracy(net, loader, cfg, device, removal_masks(credit, k, True))
+        top_acc = masked_accuracy(net, loader, cfg, device,
+                                  _as_mask_list(removal_masks(credit, k, True)))
         top_accuracies.append(top_acc)
 
         # 3. Bottom-k removal (lowest credit neurons set to 0)
-        bottom_acc = masked_accuracy(net, loader, cfg, device, removal_masks(credit, k, False))
+        bottom_acc = masked_accuracy(net, loader, cfg, device,
+                                     _as_mask_list(removal_masks(credit, k, False)))
         bottom_accuracies.append(bottom_acc)
 
         # 4. Random removal control (n_random draws of k neurons set to 0)
@@ -69,7 +82,8 @@ def faithfulness_curve(net, loader, cfg, device, credit: torch.Tensor,
         generator = torch.Generator(device='cpu')
         generator.manual_seed(seed)
         for _ in range(n_random):
-            rand_acc = masked_accuracy(net, loader, cfg, device, random_masks(credit.numel(), k, generator))
+            rand_acc = masked_accuracy(net, loader, cfg, device,
+                                       _as_mask_list(random_masks(credit.numel(), k, generator)))
             rand_accs.append(rand_acc)
 
         random_means.append(float(np.mean(rand_accs)))
