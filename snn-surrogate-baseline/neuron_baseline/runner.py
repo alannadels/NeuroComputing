@@ -17,7 +17,7 @@ from .config import Config
 from .data import build_loaders
 from .energy import EnergyMeter
 from .eval import evaluate
-from .model import build_net, forward_pass
+from .model import build_net_for, forward_pass
 from .plots import save_training_plots
 from .reproducibility import fingerprint, seed_everything
 from .train import train
@@ -38,7 +38,8 @@ def run_training(cfg: Config, run_dir: Path | None = None,
     written to results.json), ``train_energy``, ``inference_energy``.
     """
     if run_dir is None:
-        run_dir = Path(cfg.run_dir) if cfg.run_dir else Path("runs") / _now_stamp()
+        run_dir = (Path(cfg.run_dir) if cfg.run_dir
+                   else Path("runs") / f"{cfg.dataset.lower()}-{_now_stamp()}")
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg.run_dir = str(run_dir)
@@ -63,8 +64,10 @@ def run_training(cfg: Config, run_dir: Path | None = None,
         cfg.data_dir, cfg.batch_size, cfg.eval_batch_size,
         cfg.val_size, cfg.seed, num_workers=cfg.num_workers,
         pin_memory=cfg.device.startswith("cuda"),
+        dataset=cfg.dataset, augment=cfg.augment,
     )
     if verbose:
+        print(f"[data] dataset={cfg.dataset} augment={cfg.augment}")
         print(f"[data] train_batches={len(loaders['train'])} "
               f"val_examples={len(loaders['val'].dataset)} "
               f"test_examples={len(loaders['test'].dataset)}")
@@ -83,10 +86,7 @@ def run_training(cfg: Config, run_dir: Path | None = None,
 
     best_path = run_dir / "checkpoints" / "best.pt"
     ckpt = torch.load(str(best_path), map_location=device, weights_only=False)
-    eval_net = build_net(
-        beta=cfg.beta, surrogate_slope=cfg.surrogate_slope,
-        threshold=cfg.threshold, reset_mechanism=cfg.reset_mechanism,
-    ).to(device)
+    eval_net = build_net_for(cfg).to(device)
     eval_net.load_state_dict(ckpt["model_state"])
 
     for _ in range(cfg.warmup_batches):
@@ -110,6 +110,8 @@ def run_training(cfg: Config, run_dir: Path | None = None,
         energy_per_image_j = infer_energy.energy_j / test_metrics["n"]
 
     results = {
+        "dataset": cfg.dataset,
+        "augment": cfg.augment,
         "history": out["history"],
         "best_val_accuracy": out["best_val_acc"],
         "test": test_metrics,
@@ -119,7 +121,7 @@ def run_training(cfg: Config, run_dir: Path | None = None,
             "inference": infer_energy.to_dict() if infer_energy else None,
             "inference_per_image_j": energy_per_image_j,
             "measurement_notes": (
-                "GPU-only NVML reading (RTX 5080 device power); "
+                f"GPU-only NVML reading ({meter.device_name or 'no NVML device'} device power); "
                 "does not include CPU / RAM / system PSU. "
                 "torch.cuda.synchronize() at every measurement boundary. "
                 "Validation eval is inside the training window (not separated). "

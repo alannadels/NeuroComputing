@@ -6,6 +6,11 @@ Architecture (Tutorial 6 §3.1):
     Conv2d(12, 64, 5) → MaxPool2d(2) → Leaky
     Flatten() → Linear(64*4*4=1024, 10) → Leaky(output=True)
 
+For CIFAR-10 / CIFAR-100 the same layers are used; only the input channels
+(1 → 3), the flattened size (32x32 input gives 64*5*5=1600) and the number of
+output neurons (10 or 100) change. The module order is identical, so
+`diversity_layer_idx=5` still points at the second Leaky layer.
+
 Every Leaky:
   beta=0.5, spike_grad=fast_sigmoid(slope=25),
   init_hidden=True, threshold=1.0, reset_mechanism='subtract'.
@@ -24,15 +29,28 @@ import snntorch as snn
 from snntorch import surrogate, utils
 
 
+def conv_feature_size(image_size: int) -> int:
+    """Spatial size after conv5 → pool2 → conv5 → pool2 (28 → 4, 32 → 5)."""
+    s = (image_size - 4) // 2
+    s = (s - 4) // 2
+    if s < 1:
+        raise ValueError(f"image_size={image_size} is too small for this network")
+    return s
+
+
 def build_net(
     beta: float = 0.5,
     surrogate_slope: float = 25.0,
     threshold: float = 1.0,
     reset_mechanism: str = "subtract",
+    in_channels: int = 1,
+    image_size: int = 28,
+    num_classes: int = 10,
 ) -> nn.Sequential:
     spike_grad = surrogate.fast_sigmoid(slope=surrogate_slope)
+    feat = conv_feature_size(image_size)
     net = nn.Sequential(
-        nn.Conv2d(1, 12, 5),
+        nn.Conv2d(in_channels, 12, 5),
         nn.MaxPool2d(2),
         snn.Leaky(
             beta=beta, spike_grad=spike_grad, init_hidden=True,
@@ -45,13 +63,23 @@ def build_net(
             threshold=threshold, reset_mechanism=reset_mechanism,
         ),
         nn.Flatten(),
-        nn.Linear(64 * 4 * 4, 10),
+        nn.Linear(64 * feat * feat, num_classes),
         snn.Leaky(
             beta=beta, spike_grad=spike_grad, init_hidden=True, output=True,
             threshold=threshold, reset_mechanism=reset_mechanism,
         ),
     )
     return net
+
+
+def build_net_for(cfg) -> nn.Sequential:
+    """Build the network from a `Config`, sized for `cfg.dataset`."""
+    from .data import dataset_info
+    return build_net(
+        beta=cfg.beta, surrogate_slope=cfg.surrogate_slope,
+        threshold=cfg.threshold, reset_mechanism=cfg.reset_mechanism,
+        **dataset_info(cfg.dataset),
+    )
 
 
 def forward_pass(net: nn.Sequential, num_steps: int, data: torch.Tensor,

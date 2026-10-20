@@ -71,6 +71,44 @@ runs/<TS>/
     └── accuracy.png
 ```
 
+## CIFAR-10 / CIFAR-100
+
+The same baseline also runs on CIFAR-10 and CIFAR-100. MNIST stays the default
+and its code path is unchanged.
+
+| Purpose | Command |
+| --- | --- |
+| CIFAR-10 on the GPU | `.venv/Scripts/python.exe -m neuron_baseline train --dataset CIFAR10 --epochs 20 --num-workers 4` |
+| CIFAR-100 on the GPU | `.venv/Scripts/python.exe -m neuron_baseline train --dataset CIFAR100 --epochs 20 --num-workers 4` |
+| Without augmentation | add `--no-augment` |
+| Input pipeline walkthrough | `notebooks/cifar_input_pipeline.ipynb` |
+
+On Linux / macOS / Colab use `python -m neuron_baseline ...` instead of
+`.venv/Scripts/python.exe`. On a Mac without CUDA add `--device mps`
+(no NVML energy numbers there).
+
+What changes for CIFAR (`neuron_baseline/data.py`, `neuron_baseline/model.py`):
+
+- **Input:** RGB 32×32, so the first conv takes 3 channels and the flattened
+  size becomes 64·5·5 = 1600 (MNIST: 64·4·4 = 1024).
+- **Output:** 10 LIF neurons for CIFAR-10, 100 for CIFAR-100.
+- **Normalization:** per-channel mean / std of the training set
+  (CIFAR-10 `(0.4914, 0.4822, 0.4465)` / `(0.2470, 0.2435, 0.2616)`,
+  CIFAR-100 `(0.5071, 0.4865, 0.4409)` / `(0.2673, 0.2564, 0.2762)`).
+- **Augmentation (train split only):** `RandomCrop(32, padding=4)` +
+  `RandomHorizontalFlip`. The validation split is carved from the training set
+  with the same seeded permutation but always uses the clean transform.
+- **Split:** 45,000 train / 5,000 val / 10,000 test, same seed and split logic as MNIST.
+- **Encoding:** unchanged — the normalized image is presented at each of the T steps.
+- Layer order is identical, so `diversity_layer_idx=5` still taps the second Leaky layer.
+- Run folders are named `runs/<dataset>-<timestamp>/`; `results.json` records
+  `dataset` and `augment`.
+
+Notes: the Tutorial 6 hyper-parameters (lr = 1e-2, T = 50, 1 epoch) were tuned
+for MNIST. On CIFAR the network learns slowly with them, so use more epochs
+(`--epochs 20`) and compare `--lr 1e-3`. This small conv SNN is a reference
+point for the comparison, not a state-of-the-art CIFAR model.
+
 ## Model — Tutorial 6 verbatim
 
 ```
@@ -202,7 +240,7 @@ snn-surrogate-baseline/
 │   ├── __init__.py
 │   ├── __main__.py            # `python -m neuron_baseline {smoke,train,eval}`
 │   ├── config.py              # Config dataclass — every knob + fingerprint
-│   ├── data.py                # MNIST loaders + fixed val split
+│   ├── data.py                # MNIST / CIFAR-10 / CIFAR-100 loaders + fixed val split
 │   ├── model.py               # tutorial architecture + forward_pass(T)
 │   ├── train.py               # training loop + checkpoint save
 │   ├── eval.py                # full-set evaluation, variable batch size
@@ -215,7 +253,8 @@ snn-surrogate-baseline/
 ├── scripts/
 │   └── gpu_check.py           # standalone GPU sanity check
 ├── notebooks/
-│   └── baseline_walkthrough.ipynb   # calls runner.run_training(cfg) — full path
+│   ├── baseline_walkthrough.ipynb   # calls runner.run_training(cfg) — full path
+│   └── cifar_input_pipeline.ipynb   # CIFAR data input pipeline walkthrough
 ├── data/                      # MNIST (git-ignored)
 └── runs/                      # per-run outputs (git-ignored)
 ```

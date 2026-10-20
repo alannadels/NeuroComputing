@@ -186,6 +186,34 @@ def run_smoke() -> int:
     print(f"[smoke] diversity path: tap shape={tuple(hidden_rec.shape)}; "
           f"on synthetic hidden L_div={L_div.item():.4f} finite; grad flows")
 
+    # 9. CIFAR-sized networks: RGB 32x32 input, 10 / 100 output neurons,
+    #    forward shape, finite loss and gradient through every layer.
+    from neuron_baseline.data import dataset_info
+    for ds_name in ("CIFAR10", "CIFAR100"):
+        info = dataset_info(ds_name)
+        net_c = build_net(cfg.beta, cfg.surrogate_slope, cfg.threshold,
+                          cfg.reset_mechanism, **info).to(device)
+        torch.manual_seed(0)
+        xc = torch.randn(bs, info["in_channels"], info["image_size"],
+                         info["image_size"], device=device)
+        yc = torch.randint(0, info["num_classes"], (bs,), device=device)
+        spk_c, _, hid_c = forward_pass(net_c, T, xc, tap_module_idx=5)
+        if spk_c.shape != (T, bs, info["num_classes"]):
+            _fail(f"{ds_name} spk_rec shape {tuple(spk_c.shape)} != "
+                  f"{(T, bs, info['num_classes'])}")
+            return 24
+        loss_c = loss_fn(spk_c, yc)
+        if not torch.isfinite(loss_c):
+            _fail(f"{ds_name} loss not finite: {loss_c}")
+            return 25
+        loss_c.backward()
+        if any(p.grad is None or not torch.isfinite(p.grad).all()
+               for p in net_c.parameters()):
+            _fail(f"{ds_name} missing or non-finite gradient")
+            return 26
+        print(f"[smoke] {ds_name}: spk={tuple(spk_c.shape)} "
+              f"hidden={tuple(hid_c.shape)} loss={loss_c.item():.4f}")
+
     print("SMOKE PASS")
     return 0
 

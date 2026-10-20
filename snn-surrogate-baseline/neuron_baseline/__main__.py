@@ -11,6 +11,10 @@ Usage examples (from `snn-surrogate-baseline/`):
     # train longer with overrides
     .venv/Scripts/python.exe -m neuron_baseline train --epochs 5 --seed 42
 
+    # CIFAR-10 / CIFAR-100 on the GPU
+    .venv/Scripts/python.exe -m neuron_baseline train --dataset CIFAR10 --epochs 20 --num-workers 4
+    .venv/Scripts/python.exe -m neuron_baseline train --dataset CIFAR100 --epochs 20 --num-workers 4
+
     # evaluate a saved checkpoint on the test set
     .venv/Scripts/python.exe -m neuron_baseline eval --ckpt runs/<ts>/checkpoints/best.pt
 """
@@ -53,6 +57,10 @@ def _add_config_overrides(p: argparse.ArgumentParser) -> None:
     p.add_argument("--run-dir", dest="run_dir")
     p.add_argument("--device")
     p.add_argument("--num-workers", dest="num_workers", type=int)
+    p.add_argument("--dataset", type=str.upper, choices=["MNIST", "CIFAR10", "CIFAR100"],
+                   help="dataset to train on (default MNIST)")
+    p.add_argument("--augment", action=argparse.BooleanOptionalAction, default=None,
+                   help="CIFAR train-split augmentation (crop + flip); --no-augment disables")
     # Diversity regularization (Phase B2)
     p.add_argument("--diversity-lambda", dest="diversity_lambda", type=float,
                    help="weight on L_div (0 disables diversity entirely)")
@@ -70,7 +78,7 @@ def cmd_train(args: argparse.Namespace) -> int:
 
     cfg = _apply_overrides(Config(), args)
     if not cfg.run_dir:
-        cfg.run_dir = str(Path("runs") / _now_stamp())
+        cfg.run_dir = str(Path("runs") / f"{cfg.dataset.lower()}-{_now_stamp()}")
     try:
         run_training(cfg, run_dir=Path(cfg.run_dir), verbose=True)
     except RuntimeError as e:
@@ -87,7 +95,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 def cmd_eval(args: argparse.Namespace) -> int:
     import torch
     from .data import build_loaders
-    from .model import build_net
+    from .model import build_net_for
     from .eval import evaluate
     from .reproducibility import seed_everything
 
@@ -103,11 +111,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
     loaders = build_loaders(
         cfg.data_dir, cfg.batch_size, cfg.eval_batch_size,
         cfg.val_size, cfg.seed, num_workers=cfg.num_workers,
+        dataset=cfg.dataset, augment=cfg.augment,
     )
-    net = build_net(
-        beta=cfg.beta, surrogate_slope=cfg.surrogate_slope,
-        threshold=cfg.threshold, reset_mechanism=cfg.reset_mechanism,
-    ).to(device)
+    net = build_net_for(cfg).to(device)
     net.load_state_dict(ckpt["model_state"])
     m = evaluate(net, loaders["test"], cfg.num_steps, device)
     print(json.dumps({"ckpt": str(ckpt_path), "test": m, "cfg_epoch": ckpt.get("epoch")},

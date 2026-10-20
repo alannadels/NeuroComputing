@@ -22,7 +22,7 @@ from typing import Any
 @dataclass
 class Config:
     # --- Tutorial 6 verbatim ---
-    dataset: str = "MNIST"
+    dataset: str = "MNIST"           # ADAPTATION: also "CIFAR10" / "CIFAR100"
     num_steps: int = 50              # simulation duration T
     batch_size: int = 128
     beta: float = 0.5                # LIF decay
@@ -40,6 +40,7 @@ class Config:
     data_dir: str = "./data"
     run_dir: str = ""                # resolved at runtime if empty
     num_workers: int = 0             # 0 = safer on Windows
+    augment: bool = True             # CIFAR only: random crop + flip on train split (MNIST ignores it)
     device: str = "cuda"             # never silently fall back
     energy_sample_hz: float = 20.0   # NVML power sampler cadence (only if cumulative energy unavailable)
     inference_min_batches: int = 20  # for the energy-per-image measurement window

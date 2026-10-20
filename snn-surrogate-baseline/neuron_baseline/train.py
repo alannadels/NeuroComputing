@@ -21,7 +21,7 @@ import snntorch.functional as SF
 from .config import Config
 from .eval import evaluate
 from .kernels import kernel_matrix, pairwise_diversity_loss, smooth_exp
-from .model import build_net, forward_pass
+from .model import build_net_for, forward_pass
 
 
 def _diversity_term(hidden_rec: torch.Tensor, cfg: Config) -> torch.Tensor:
@@ -93,10 +93,7 @@ def save_checkpoint(path: Path, net, optimizer, cfg: Config, epoch: int,
 
 def train(cfg: Config, loaders: dict, device: torch.device, run_dir: Path
           ) -> dict:
-    net = build_net(
-        beta=cfg.beta, surrogate_slope=cfg.surrogate_slope,
-        threshold=cfg.threshold, reset_mechanism=cfg.reset_mechanism,
-    ).to(device)
+    net = build_net_for(cfg).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, betas=cfg.adam_betas)
     loss_fn = SF.ce_rate_loss()
 
