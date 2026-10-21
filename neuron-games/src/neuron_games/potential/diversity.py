@@ -5,11 +5,15 @@ OWNER: Deyvik. See Architecture_Work_14-10-2026.md, "Deyvik".
 V is a *reward*: potential.py adds -beta * V to the cost. Higher V = more
 diverse layer. Computed per hidden layer and summed over layers (eq. 13, 14).
 
-The glue (`diversity_term`) is done: it builds the feature objects for every
-hidden layer, forms the [N_l, N_l] Gram matrix with the existing
-`neuron_baseline.kernels.kernel_matrix`, reduces it with the configured form,
-and gets the learning signals by local autograd. What is left is the four
-functions marked TODO.
+`diversity_term` builds the feature objects for every hidden layer, forms
+the [N_l, N_l] Gram matrix with `neuron_baseline.kernels.kernel_matrix`,
+reduces it with the configured form, and returns the learning signals
+dV/ds (spike feature) or dV/du (plasticity-signature feature) in closed form:
+
+    dV/dK  (form)  ->  dV/dF  (kernel)  ->  dV/ds or dV/du  (feature)
+
+No autograd is used. The value functions below stay differentiable so
+tests/test_diversity.py can check every closed form against autograd.
 """
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ import torch
 from .._baseline import BASELINE_ROOT  # noqa: F401  (puts neuron_baseline on sys.path)
 from neuron_baseline.kernels import kernel_matrix, smooth_exp  # noqa: E402
 from ..model import fast_sigmoid_grad
-from .base import TermContext, TermOutput, signals_from_autograd
+from ..learning_rule import LayerSignals
+from .base import TermContext, TermOutput
 
 
 def feature_objects(ctx: TermContext, l: int, spk: torch.Tensor,
@@ -91,8 +96,13 @@ def dpp_logdet_value(K: torch.Tensor, eps_scale: float) -> torch.Tensor:
     if K.dim() != 2 or K.shape[0] != K.shape[1]:
         raise ValueError(f"K must be [N, N], got {tuple(K.shape)}")
     N = K.shape[0]
-    K_n = K / K.diagonal().mean()
     eye = torch.eye(N, device=K.device, dtype=K.dtype)
+    m = K.diagonal().mean()
+    if float(m.detach()) <= 0.0:
+        # Silent layer (K = 0): K_n is undefined. log det(eps I) is the value
+        # of a fully redundant layer; no signal is defined there.
+        return N * torch.log(K.new_tensor(eps_scale))
+    K_n = K / m
     L, info = torch.linalg.cholesky_ex(K_n + eps_scale * eye)
     if int(info) != 0:
         L, info = torch.linalg.cholesky_ex(K_n + (10.0 * eps_scale) * eye)
@@ -124,14 +134,103 @@ def _layer_value(ctx: TermContext, l: int, spk: torch.Tensor, mem: torch.Tensor)
     raise ValueError(f"unknown diversity {cfg.diversity!r}")
 
 
+# --- closed-form derivatives (no autograd) ---------------------------------
+
+def _dV_dK(K: torch.Tensor, cfg) -> torch.Tensor:
+    """dV/dK for one layer, [N, N]."""
+    N = K.shape[0]
+    if cfg.diversity == "kernel_offdiag":
+        if N < 2:
+            return torch.zeros_like(K)
+        return -(torch.ones_like(K) - torch.eye(N, device=K.device, dtype=K.dtype)) / (N * (N - 1))
+    if cfg.diversity == "dpp_logdet":
+        m = K.diagonal().mean()
+        if float(m.detach()) <= 0.0:
+            return torch.zeros_like(K)
+        eye = torch.eye(N, device=K.device, dtype=K.dtype)
+        K_n = K / m
+        eps = cfg.dpp_eps_scale
+        L, info = torch.linalg.cholesky_ex(K_n + eps * eye)
+        if int(info) != 0:                      # same retry rule as dpp_logdet_value
+            eps = 10.0 * cfg.dpp_eps_scale
+            L, info = torch.linalg.cholesky_ex(K_n + eps * eye)
+            if int(info) != 0:
+                raise RuntimeError(f"dpp_logdet: Cholesky failed at eps={cfg.dpp_eps_scale} "
+                                   f"and 10x retry; info={int(info)}")
+        A_inv = torch.cholesky_inverse(L)        # (K/m + eps I)^-1, symmetric
+        # V = log det(K/m + eps I), m = tr(K)/N:
+        # dV/dK = A^-1 / m - tr(A^-1 K) / (N m^2) * I
+        return A_inv / m - (torch.trace(A_inv @ K) / (N * m * m)) * eye
+    if cfg.diversity == "mmd":
+        raise NotImplementedError("mmd diversity has no implementation yet")
+    raise ValueError(f"unknown diversity {cfg.diversity!r}")
+
+
+def _dV_dF(F: torch.Tensor, K: torch.Tensor, G: torch.Tensor, cfg) -> torch.Tensor:
+    """Chain dV/dK = G through K = kernel(F), [N, D]."""
+    Gs = G + G.transpose(0, 1)
+    kind = cfg.diversity_kernel
+    if kind in ("binned", "mci", "vanrossum"):          # K = F F^T
+        return Gs @ F
+    if kind == "count":                                  # K = c c^T, c = F 1
+        c = F.sum(dim=-1)
+        return (Gs @ c).unsqueeze(-1).expand_as(F)
+    if kind == "schoenberg":                             # K = exp(-D / 2 sigma^2)
+        sigma = cfg.diversity_sigma
+        sq = (F * F).sum(dim=-1, keepdim=True)
+        D_raw = sq + sq.transpose(0, 1) - 2.0 * (F @ F.transpose(0, 1))
+        S = G * K * (-1.0 / (2.0 * sigma * sigma)) * (D_raw >= 0).to(F.dtype)   # dV/dD
+        Ss = S + S.transpose(0, 1)
+        return 2.0 * Ss.sum(dim=1, keepdim=True) * F - 2.0 * (Ss @ F)
+    raise ValueError(f"unknown kernel {kind!r}")
+
+
+def _smooth_adjoint(g: torch.Tensor, tau: float) -> torch.Tensor:
+    """Adjoint of smooth_exp along the last axis: the causal filter applied
+    backwards in time (flip, filter, flip)."""
+    return smooth_exp(g.flip(-1), tau=tau, axis=-1).flip(-1)
+
+
+def _layer_signal(ctx: TermContext, l: int) -> tuple[torch.Tensor, LayerSignals]:
+    cfg = ctx.cfg
+    spk, mem = ctx.rec.spk[l], ctx.rec.mem[l]
+    T, B, N = spk.shape
+    F = feature_objects(ctx, l, spk, mem)
+    params = {"sigma": cfg.diversity_sigma} if cfg.diversity_kernel == "schoenberg" else {}
+    K = kernel_matrix(F, kind=cfg.diversity_kernel, **params)
+    if cfg.diversity == "kernel_offdiag":
+        value = kernel_offdiag_value(K)
+    elif cfg.diversity == "dpp_logdet":
+        value = dpp_logdet_value(K, cfg.dpp_eps_scale)
+    else:
+        value = mmd_value(K)
+    dF = _dV_dF(F, K, _dV_dK(K, cfg), cfg)
+
+    if cfg.diversity_feature == "spike":
+        d_rows = dF.reshape(N, B, T)
+        if cfg.diversity_kernel in ("mci", "vanrossum", "schoenberg"):
+            d_rows = _smooth_adjoint(d_rows, cfg.diversity_tau)
+        return value, LayerSignals(spike=d_rows.permute(2, 1, 0).contiguous())
+
+    # plasticity_signature: rows = h(u - v_th) * ||eps||, h(v) = (1 + k|v|)^-2
+    d_rows = dF.reshape(N, T, B).permute(1, 2, 0)                       # [T, B, N]
+    eps_norm = ctx.rec.eps[l].pow(2).sum(dim=-1).sqrt().unsqueeze(-1)    # [T, B, 1]
+    v = mem - cfg.threshold
+    k = cfg.surrogate_slope
+    dh_dv = -2.0 * k * torch.sign(v) / (1.0 + k * v.abs()) ** 3
+    return value, LayerSignals(mem=d_rows * eps_norm * dh_dv)
+
+
+@torch.no_grad()
 def diversity_term(ctx: TermContext) -> TermOutput:
-    """V summed over hidden layers, with local derivatives wrt s and u."""
-    layers = ctx.hidden_layers
-
-    def value(spk, mem, _weights):
-        return sum(_layer_value(ctx, l, spk[l], mem[l]) for l in layers)
-
-    return signals_from_autograd(ctx, value, wrt_spikes=True, wrt_mem=True, wrt_weights=False)
+    """V summed over hidden layers, with closed-form local derivatives."""
+    signals = [LayerSignals() for _ in range(ctx.n_layers)]
+    total = torch.zeros((), device=ctx.weights[0].device)
+    for l in ctx.hidden_layers:
+        value, sig = _layer_signal(ctx, l)
+        total = total + value
+        signals[l] = sig
+    return TermOutput(value=total.detach(), signals=signals)
 
 
 __all__ = ["feature_objects", "kernel_offdiag_value", "dpp_logdet_value", "mmd_value",

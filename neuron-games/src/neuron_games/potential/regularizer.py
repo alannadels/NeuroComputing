@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import torch
 
-from .base import TermContext, TermOutput, signals_from_autograd
+from ..learning_rule import LayerSignals
+from .base import TermContext, TermOutput
 
 
 def regularizer_value(weights: list[torch.Tensor]) -> torch.Tensor:
@@ -14,6 +15,8 @@ def regularizer_value(weights: list[torch.Tensor]) -> torch.Tensor:
     return sum((w * w).sum() for w in weights)
 
 
+@torch.no_grad()
 def regularizer_term(ctx: TermContext) -> TermOutput:
-    return signals_from_autograd(ctx, lambda s, u, w: regularizer_value(w),
-                                 wrt_spikes=False, wrt_mem=False, wrt_weights=True)
+    """Value and closed-form derivative dR/dW_l = 2 W_l (no autograd)."""
+    return TermOutput(value=regularizer_value(ctx.weights).detach(),
+                      signals=[LayerSignals(weight=2.0 * w) for w in ctx.weights])

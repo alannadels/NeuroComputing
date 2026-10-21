@@ -14,7 +14,10 @@ A window is one presentation of a mini-batch for T steps. `NeuronGame.step`:
  7. Optimizer step (sgd: dW = -eta * grad, eq. 3), barrier
     projection, then record dW^(n) and the running rates Z.      §11.6
 
-Nothing here calls .backward() on the network.
+No backpropagation anywhere: the network's parameters are frozen out of
+autograd (requires_grad=False), the step runs under torch.no_grad(), and the
+whole step is wrapped in guard.forbid_autograd(), which raises if anything
+calls torch.autograd.backward / torch.autograd.grad / Tensor.backward.
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from .guard import forbid_autograd
 from .learning_rule import LayerSignals, three_factor_grads
 from .model import FCSNN
 from .modulator.base import CreditContext, build_credit
@@ -57,6 +61,10 @@ class NeuronGame:
         n = len(net.layers)
         self.credit_layers = list(range(n - 1)) if cfg.credit_layers == "hidden" else list(range(n))
         self.loss_fn = task_loss(cfg.task_loss)
+        # Weights are only ever changed through p.grad = three-factor update,
+        # so autograd has nothing to track.
+        for p in net.parameters():
+            p.requires_grad_(False)
 
     def task_signals(self, out_spk: torch.Tensor, targets: torch.Tensor) -> list[LayerSignals]:
         delta = output_error(self.cfg.task_loss, out_spk, targets)
@@ -66,6 +74,11 @@ class NeuronGame:
     @torch.no_grad()
     def step(self, x_seq: torch.Tensor, targets: torch.Tensor,
              optimizer: torch.optim.Optimizer, epoch: int = 0) -> WindowResult:
+        with forbid_autograd():
+            return self._step(x_seq, targets, optimizer, epoch)
+
+    def _step(self, x_seq: torch.Tensor, targets: torch.Tensor,
+              optimizer: torch.optim.Optimizer, epoch: int) -> WindowResult:
         cfg, net, state = self.cfg, self.net, self.state
         params = net.weights
         W = [w.detach() for w in params]

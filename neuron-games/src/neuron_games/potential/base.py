@@ -9,11 +9,11 @@ A term is a function `term(ctx: TermContext) -> TermOutput`.
   convention: plain derivatives of the term's value. potential.py applies the
   sign and coefficient from C = J - beta*V + mu*(E_met + alpha_bar*E_bar) + lam*R.
 
-The easy way to write a term is `signals_from_autograd`: write the value as
-a differentiable function of the recorded spikes / membranes / weights and
-let autograd take the *local* derivatives. That autograd call only touches
-the recorded tensors (treated as leaves); it never runs back through the LIF
-recurrence or between layers, so it stays within the three-factor rule.
+Every term computes its signals in closed form. Autograd is never used in
+the three-factor training step: `NeuronGame.step` runs inside
+`guard.forbid_autograd()`, which raises on any backward / grad call. Each
+term keeps a differentiable `*_value` function so the tests can check the
+closed forms against autograd (tests/helpers.py `autograd_signals`).
 
 Normalization convention, so all terms are on the same scale as J (which is
 a batch mean): sum over neurons and time, mean over the batch.
@@ -59,33 +59,3 @@ class TermOutput:
 
 
 TermFn = Callable[[TermContext], TermOutput]
-ValueFn = Callable[[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]], torch.Tensor]
-
-
-def signals_from_autograd(ctx: TermContext, value_fn: ValueFn,
-                          wrt_spikes: bool = True, wrt_mem: bool = True,
-                          wrt_weights: bool = True) -> TermOutput:
-    """Local derivatives of `value_fn(spk, mem, weights) -> scalar`.
-
-    spk[l], mem[l] are leaf copies of the recorded [T, B, N_l] tensors and
-    weights[l] a leaf copy of W_l. Disable the paths a term does not use to
-    save work; disabled paths come back as None.
-    """
-    with torch.enable_grad():
-        spk = [s.detach().clone().requires_grad_(wrt_spikes) for s in ctx.rec.spk]
-        mem = [u.detach().clone().requires_grad_(wrt_mem) for u in ctx.rec.mem]
-        ws = [w.detach().clone().requires_grad_(wrt_weights) for w in ctx.weights]
-        value = value_fn(spk, mem, ws)
-        leaves = ([*spk] if wrt_spikes else []) + ([*mem] if wrt_mem else []) + \
-                 ([*ws] if wrt_weights else [])
-        grads = torch.autograd.grad(value, leaves, allow_unused=True) if leaves else []
-
-    grads = list(grads)
-    L = ctx.n_layers
-    g_spk = grads[:L] if wrt_spikes else [None] * L
-    grads = grads[L:] if wrt_spikes else grads
-    g_mem = grads[:L] if wrt_mem else [None] * L
-    grads = grads[L:] if wrt_mem else grads
-    g_w = grads[:L] if wrt_weights else [None] * L
-    return TermOutput(value=value.detach(),
-                      signals=[LayerSignals(g_spk[l], g_mem[l], g_w[l]) for l in range(L)])

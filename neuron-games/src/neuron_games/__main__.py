@@ -21,6 +21,9 @@ from .config import (BARRIERS, CONDITIONS, CREDIT, DIVERSITY, DIVERSITY_FEATURES
 def _add_config_overrides(p: argparse.ArgumentParser) -> None:
     p.add_argument("--condition", choices=sorted(CONDITIONS))
     p.add_argument("--epochs", type=int)
+    p.add_argument("--dataset", help="MNIST | FashionMNIST (aliases: mnist, fashion_mnist)")
+    p.add_argument("--max-train-batches", dest="max_train_batches", type=int,
+                   help="stop each epoch after this many batches (0 = full epoch)")
     p.add_argument("--batch-size", dest="batch_size", type=int)
     p.add_argument("--eval-batch-size", dest="eval_batch_size", type=int)
     p.add_argument("--num-steps", dest="num_steps", type=int)
@@ -80,7 +83,8 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 def cmd_eval(args: argparse.Namespace) -> int:
     import torch
-    from ._baseline import build_loaders, seed_everything
+    from ._baseline import seed_everything
+    from .data import loaders_for
     from .eval import evaluate
     from .model import build_net
     from .runner import resolve_device
@@ -91,9 +95,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         cfg.device = args.device
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
-    loaders = build_loaders(cfg.data_dir, cfg.batch_size, cfg.eval_batch_size,
-                            cfg.val_size, cfg.seed, num_workers=cfg.num_workers,
-                            pin_memory=False)
+    loaders = loaders_for(cfg, pin_memory=False)
     net = build_net(cfg).to(device)
     net.load_state_dict(ckpt["model_state"])
     m = evaluate(net, loaders["test"], cfg, device)

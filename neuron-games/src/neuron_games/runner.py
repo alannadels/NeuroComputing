@@ -11,10 +11,12 @@ from pathlib import Path
 
 import torch
 
-from ._baseline import EnergyMeter, build_loaders, fingerprint, save_training_plots, seed_everything
+from ._baseline import EnergyMeter, fingerprint, save_training_plots, seed_everything
 from .config import NGRunConfig
+from .data import loaders_for
 from .encoding import encode
 from .eval import evaluate
+from .guard import BackpropInvoked, count_autograd_calls
 from .model import build_net
 from .train import train
 
@@ -47,14 +49,11 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
         print(f"[cfg] condition={cfg.condition} (row {cfg.row}) run_dir={run_dir}")
         print(f"[cfg] device={device} torch={cfg.fingerprint.get('torch')} "
               f"net={cfg.n_in}-{cfg.n_hidden}-{cfg.n_out} T={cfg.num_steps} "
-              f"encoding={cfg.encoding} loss={cfg.task_loss}")
+              f"encoding={cfg.encoding} loss={cfg.task_loss} dataset={cfg.dataset} "
+              f"rule={cfg.learning_rule}")
     cfg.save(run_dir / "config.json")
 
-    loaders = build_loaders(
-        cfg.data_dir, cfg.batch_size, cfg.eval_batch_size,
-        cfg.val_size, cfg.seed, num_workers=cfg.num_workers,
-        pin_memory=cfg.device.startswith("cuda"),
-    )
+    loaders = loaders_for(cfg)
     if verbose:
         print(f"[data] train_batches={len(loaders['train'])} "
               f"val_examples={len(loaders['val'].dataset)} "
@@ -65,11 +64,16 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
         print(f"[energy] nvml_available={meter.available} "
               f"cumulative_energy={meter.has_cumulative} device='{meter.device_name}'")
 
-    with meter.measure("train"):
+    with meter.measure("train"), count_autograd_calls() as autograd_calls:
         t0 = time.perf_counter()
         out = train(cfg, loaders, device, run_dir)
         train_wall_s = time.perf_counter() - t0
     train_energy = meter.result
+    if cfg.learning_rule == "three_factor" and autograd_calls.calls != 0:
+        raise BackpropInvoked(f"{autograd_calls.calls} autograd backward/grad calls during "
+                              f"three-factor training; the method must use none")
+    if verbose:
+        print(f"[audit] autograd backward/grad calls during training: {autograd_calls.calls}")
 
     ckpt = torch.load(str(run_dir / "checkpoints" / "best.pt"),
                       map_location=device, weights_only=False)
@@ -99,6 +103,8 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
             "condition": cfg.condition,
             "row": cfg.row,
             "learning_rule": cfg.learning_rule,
+            "dataset": cfg.dataset,
+            "autograd_calls_in_training": autograd_calls.calls,
             "potential": {"diversity": cfg.diversity, "diversity_feature": cfg.diversity_feature,
                           "metabolic": cfg.metabolic, "barrier": cfg.barrier,
                           "credit": cfg.credit, "credit_modulates": cfg.credit_modulates,

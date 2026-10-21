@@ -54,6 +54,16 @@ DIVERSITY_KERNELS = ("mci", "vanrossum", "binned", "count", "schoenberg")
 METABOLIC = ("none", "basic")
 BARRIERS = ("none", "quadratic", "log")
 CREDIT = ("none", "eligibility_shapley", "shapley_taylor")
+DATASETS = ("MNIST", "FashionMNIST")          # 28x28 grayscale, 10 classes (proposal §12.1)
+DATASET_ALIASES = {"mnist": "MNIST", "fashion_mnist": "FashionMNIST",
+                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST"}
+
+
+def canonical_dataset(name: str) -> str:
+    key = DATASET_ALIASES.get(name.lower(), name)
+    if key not in DATASETS:
+        raise ValueError(f"unknown dataset {name!r}; known: {list(DATASETS)}")
+    return key
 
 
 @dataclass
@@ -70,7 +80,7 @@ class NGRunConfig:
     bias: bool = False                    # every trainable parameter is a synapse w_ij
 
     # --- Input / task (J) ---
-    dataset: str = "MNIST"
+    dataset: str = "MNIST"                # MNIST | FashionMNIST (aliases: mnist, fashion_mnist)
     num_steps: int = 25                   # T: one adaptation window = one presentation
     encoding: str = "rate"                # rate (Bernoulli) | direct (same pixels each step)
     task_loss: str = "ce_rate"            # ce_rate (mean_t CE on spk[t]) | ce_count (CE on spike counts)
@@ -125,6 +135,7 @@ class NGRunConfig:
     adam_betas: tuple[float, float] = (0.9, 0.999)
     epochs: int = 1
     batch_size: int = 128
+    max_train_batches: int = 0            # >0: stop each epoch after this many batches (smoke runs)
 
     # --- Evaluation / reproducibility (same meaning as neuron_baseline.Config) ---
     val_size: int = 5000
@@ -144,6 +155,7 @@ class NGRunConfig:
             if value not in allowed:
                 raise ValueError(f"unknown {name} {value!r}; known: {list(allowed)}")
 
+        self.dataset = canonical_dataset(self.dataset)
         if self.condition not in CONDITIONS:
             raise ValueError(f"unknown condition {self.condition!r}; known: {sorted(CONDITIONS)}")
         _check("encoding", self.encoding, ("rate", "direct"))

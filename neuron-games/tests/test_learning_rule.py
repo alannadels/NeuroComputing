@@ -17,7 +17,8 @@ from neuron_games.learning_rule import LayerSignals, layer_grad, three_factor_gr
 from neuron_games.model import FCSNN
 from neuron_games.modulator.base import CreditResult
 from neuron_games.modulator.random_feedback import RandomFeedback
-from neuron_games.potential.base import TermContext, signals_from_autograd
+from neuron_games.potential.base import TermContext
+from helpers import autograd_signals
 from neuron_games.potential.potential import active_terms, evaluate_potential, phi_value
 from neuron_games.potential.task import ce_count_loss, ce_rate_loss, output_error
 from neuron_games.train import build_optimizer
@@ -118,19 +119,6 @@ def test_random_feedback_is_fixed_and_seeded() -> None:
 
 # --- potential plumbing -------------------------------------------------------
 
-def test_signals_from_autograd_local_derivatives() -> None:
-    net, x = _net(), _x()
-    with torch.no_grad():
-        rec = net(x, record_traces=True)
-    ctx = TermContext(rec=rec, weights=[w.detach() for w in net.weights], cfg=None)
-    out = signals_from_autograd(
-        ctx, lambda s, u, w: 2.0 * s[0].sum() + (u[1] ** 2).sum() + 3.0 * w[1].sum())
-    torch.testing.assert_close(out.signals[0].spike, torch.full_like(rec.spk[0], 2.0))
-    torch.testing.assert_close(out.signals[1].mem, 2.0 * rec.mem[1])
-    torch.testing.assert_close(out.signals[1].weight, torch.full_like(net.weights[1], 3.0))
-    assert out.signals[0].weight is None or out.signals[0].weight.abs().sum() == 0
-
-
 def test_no_terms_means_phi_is_minus_J() -> None:
     cfg = NGRunConfig.for_condition("three_factor")
     assert active_terms(cfg) == []
@@ -147,7 +135,7 @@ def test_composer_signs(monkeypatch) -> None:
     W = [w.detach() for w in net.weights]
 
     def ones_on_hidden_spikes(ctx):
-        return signals_from_autograd(ctx, lambda s, u, w: s[0].sum(),
+        return autograd_signals(ctx, lambda s, u, w: s[0].sum(),
                                      wrt_mem=False, wrt_weights=False)
 
     monkeypatch.setattr(P, "diversity_term", ones_on_hidden_spikes)

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import torch
 
-from .base import TermContext, TermOutput, signals_from_autograd
+from ..learning_rule import LayerSignals
+from .base import TermContext, TermOutput
 
 
 def metabolic_value(spk: list[torch.Tensor], mem: list[torch.Tensor],
@@ -27,7 +28,30 @@ def metabolic_value(spk: list[torch.Tensor], mem: list[torch.Tensor],
     return cfg.c_s * spike_cost + cfg.c_u * mem_cost + cfg.c_w * weight_cost
 
 
+def _abs_pow_grad(w: torch.Tensor, p: float) -> torch.Tensor:
+    """d/dw |w|^p = p * |w|^(p-1) * sign(w), with 0 at w = 0 (as autograd gives)."""
+    if p == 2.0:
+        return 2.0 * w
+    if p == 1.0:
+        return torch.sign(w)
+    return torch.where(w == 0, torch.zeros_like(w), p * w.abs().pow(p - 1.0) * torch.sign(w))
+
+
+@torch.no_grad()
 def metabolic_term(ctx: TermContext) -> TermOutput:
-    return signals_from_autograd(
-        ctx, lambda s, u, w: metabolic_value(s, u, w, ctx.cfg),
-        wrt_spikes=True, wrt_mem=True, wrt_weights=True)
+    """Value and closed-form local derivatives of eq. 15 (no autograd):
+
+        dE/ds_l[t] = c_s / B      dE/du_l[t] = 2 c_u u_l[t] / B
+        dE/dW_l    = c_w * p * |W_l|^(p-1) * sign(W_l)
+    """
+    cfg, rec = ctx.cfg, ctx.rec
+    B = rec.spk[0].shape[1]
+    value = metabolic_value(rec.spk, rec.mem, ctx.weights, cfg)
+    signals = []
+    for l in range(ctx.n_layers):
+        signals.append(LayerSignals(
+            spike=torch.full_like(rec.spk[l], cfg.c_s / B) if cfg.c_s != 0 else None,
+            mem=(2.0 * cfg.c_u / B) * rec.mem[l] if cfg.c_u != 0 else None,
+            weight=cfg.c_w * _abs_pow_grad(ctx.weights[l], cfg.p_w) if cfg.c_w != 0 else None,
+        ))
+    return TermOutput(value=value.detach(), signals=signals)

@@ -18,7 +18,8 @@ import math
 
 import torch
 
-from .base import TermContext, TermOutput, signals_from_autograd
+from ..learning_rule import LayerSignals
+from .base import TermContext, TermOutput
 
 
 def phi_t(z: torch.Tensor, t: float) -> torch.Tensor:
@@ -87,7 +88,36 @@ def project_(weights: list[torch.Tensor], cfg) -> None:
         w.clamp_(lo, hi)
 
 
+def phi_t_grad(z: torch.Tensor, t: float) -> torch.Tensor:
+    """d/dz phi_t(z): -1/(t z) on the log branch (z <= -1/t^2), t on the linear branch."""
+    switch = 1.0 / (t * t)
+    return torch.where(z <= -switch, -1.0 / (t * torch.minimum(z, torch.full_like(z, -switch))),
+                       torch.full_like(z, t))
+
+
+def _box_grad(x: torch.Tensor, lo: float, hi: float, cfg, epoch: int) -> torch.Tensor:
+    """d/dx of the per-element box penalty used in barrier_value."""
+    if cfg.barrier == "quadratic":
+        return 2.0 * torch.relu(x - hi) - 2.0 * torch.relu(lo - x)
+    if cfg.barrier == "log":
+        t = cfg.barrier_t0 * cfg.barrier_mu ** epoch
+        # box = phi_t(lo - x) + phi_t(x - hi)
+        return -phi_t_grad(lo - x, t) + phi_t_grad(x - hi, t)
+    raise ValueError(f"barrier_term called with barrier={cfg.barrier!r}")
+
+
+@torch.no_grad()
 def barrier_term(ctx: TermContext) -> TermOutput:
-    return signals_from_autograd(
-        ctx, lambda s, u, w: barrier_value(s, u, w, ctx.cfg, ctx.epoch),
-        wrt_spikes=False, wrt_mem=True, wrt_weights=True)
+    """Value and closed-form local derivatives of barrier_value (no autograd).
+
+    Weights: d/dW of the box penalty. Membranes: the same, divided by the
+    batch size (the membrane part is a batch mean). No spike dependence.
+    """
+    cfg, rec = ctx.cfg, ctx.rec
+    B = rec.mem[0].shape[1]
+    value = barrier_value(rec.spk, rec.mem, ctx.weights, cfg, ctx.epoch)
+    signals = [LayerSignals(
+        mem=_box_grad(rec.mem[l], cfg.u_min, cfg.u_max, cfg, ctx.epoch) / B,
+        weight=_box_grad(ctx.weights[l], cfg.w_min, cfg.w_max, cfg, ctx.epoch),
+    ) for l in range(ctx.n_layers)]
+    return TermOutput(value=value.detach(), signals=signals)

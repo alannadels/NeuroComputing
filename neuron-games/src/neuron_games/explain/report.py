@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import torch
 import json
+import matplotlib
+matplotlib.use("Agg")  # headless-safe, like neuron_baseline.plots
 import matplotlib.pyplot as plt
 
 from pathlib import Path
 from ..config import NGRunConfig
+from .attribution import load_credit
 from .metrics import faithfulness_curve, stability, sparsity
-from .._baseline import build_loaders
+from ..data import loaders_for
 from ..model import build_net
 
 
@@ -46,49 +49,41 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
 
     # 4. Build test loader
     # Assumes build_loaders returns (train_loader, val_loader, test_loader) or similar
-    loaders = build_loaders(
-            cfg.data_dir, cfg.batch_size, cfg.eval_batch_size,
-            cfg.val_size, cfg.seed, num_workers=cfg.num_workers,
-            pin_memory=cfg.device.startswith("cuda"),
-        )
+    loaders = loaders_for(cfg, pin_memory=False)
     # Typically test loader is the last element or explicitly indexed
     test_loader = loaders[-1] if isinstance(loaders, (list, tuple)) else loaders.get("test", loaders)
     
-    # 5. Extract credit vectors from checkpoint / history
-    # Checking common checkpoint keys for credit/phi history across epochs
-    epochs_credit = ckpt.get("credits", ckpt.get("epoch_credits", None))
-    if epochs_credit is None and "credit" in ckpt:
-        epochs_credit = [ckpt["credit"]]
-    elif epochs_credit is None:
-        # Fallback if stored inside history/metrics log
-        epochs_credit = [torch.zeros(64, device=device)] # Default fallback placeholder
-        
+    # 5. Credit vectors per epoch, from results.json (written by train.py as
+    # history["epoch_credit_per_neuron"]); the checkpoint does not store them.
+    n_epochs = len(json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+                   ["history"].get("epoch_credit_per_neuron", []))
+    if n_epochs == 0:
+        raise ValueError(f"{run_dir} has no per-epoch credit; was it trained with --credit?")
+
     # Default hidden layer is 0
     layer_idx = 0
-    
+
+    def _layer_credit(epoch: int) -> torch.Tensor:
+        c = load_credit(run_dir, epoch)[layer_idx]
+        if c is None:
+            raise ValueError(f"layer {layer_idx} was not credited in {run_dir}")
+        return c.to(device)
+
     # Get last epoch's credit for faithfulness and sparsity
-    last_credit = epochs_credit[-1]
-    if isinstance(last_credit, list):
-        last_credit = last_credit[layer_idx] # grabs hidden layer credit
-    last_credit = last_credit.detach().to(device)
-    
-    # Compute faithfulness curve
-    ks = [0, 8, 16, 32, 64]
+    last_credit = _layer_credit(n_epochs - 1)
+
+    # Compute faithfulness curve (k never exceeds the layer size)
+    n_neurons = last_credit.numel()
+    ks = sorted({min(k, n_neurons) for k in [0, 8, 16, 32, 64]})
     faith_results = faithfulness_curve(net, test_loader, cfg, device, last_credit,
                                        layer=layer_idx, ks=ks)
-    
-    # Compute stability between last two epochs (if available)
-    stab_results = {}
-    if len(epochs_credit) >= 2:
-        c_prev = epochs_credit[-2]
-        c_curr = epochs_credit[-1]
-        if isinstance(c_prev, list):
-            c_prev = c_prev[layer_idx]
-        if isinstance(c_curr, list):
-            c_curr = c_curr[layer_idx]
-        stab_results = stability(c_prev.to(device), c_curr.to(device))
+
+    # Compute stability between last two epochs (None with a single epoch)
+    if n_epochs >= 2:
+        stab_results = stability(_layer_credit(n_epochs - 2), last_credit)
     else:
-        stab_results = {"spearman": 1.0, "top10_jaccard": 1.0}
+        stab_results = {"spearman": None, "top10_jaccard": None,
+                        "note": "needs at least 2 epochs"}
         
     # Compute sparsity of the last epoch's credit
     sparsity_results = sparsity(last_credit)

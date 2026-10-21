@@ -36,7 +36,9 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device) -> d
     net.train()
     loss_fn = task_loss(cfg.task_loss)
     out: dict[str, list] = {"loss": [], "acc": [], "rates": []}
-    for data, targets in loader:
+    for i, (data, targets) in enumerate(loader):
+        if cfg.max_train_batches and i >= cfg.max_train_batches:
+            break
         data = data.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -61,7 +63,9 @@ def _train_one_epoch_game(game: NeuronGame, loader, optimizer, cfg: NGRunConfig,
                             "components": [], "grad_norms": []}
     credit_sum: list[torch.Tensor | None] = [None] * len(game.net.layers)
     credit_n = 0
-    for data, targets in loader:
+    for i, (data, targets) in enumerate(loader):
+        if cfg.max_train_batches and i >= cfg.max_train_batches:
+            break
         data = data.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         res = game.step(encode(data, cfg.num_steps, cfg.encoding), targets, optimizer, epoch)

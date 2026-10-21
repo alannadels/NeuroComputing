@@ -1,5 +1,12 @@
 # Neuron Games — Architecture & Work Split (14/10/2026)
 
+> **Status update (20/10/2026):** every assigned part is implemented and merged into
+> `main` (Deyvik: PR #2, Joohyun: PR #3, William and the Shapley-Taylor stretch:
+> PR #5 plus the merge of `ng/wboccard`). All six conditions, the `explain` report, the
+> ablation driver and the aggregator run end to end. This document is kept as the
+> record of the original split; current defaults and results are in
+> `neuron-games/docs/experiments/` and `neuron-games/README.md`.
+
 This document describes the `main` branch as of 14/10/2026: what the
 Neuron Games pipeline looks like, what is already implemented, and exactly
 what each of us (Joohyun, Deyvik, William) needs to finish so that the full
@@ -59,7 +66,7 @@ One window = one mini-batch presented for T = 25 steps (proposal §11).
 
 ## 3. File map
 
-Status: `[done]` implemented and tested; `[todo]` stub with spec and acceptance tests (yours to finish)
+Status: every file below is implemented and tested (as of 20/10/2026).
 
 ```
 neuron-games/
@@ -77,28 +84,28 @@ neuron-games/
 │   │   ├── base.py            [done] TermContext / TermOutput contract, signals_from_autograd
 │   │   ├── task.py            [done] J and closed-form output error
 │   │   ├── potential.py       [done] composes terms into C and Φ
-│   │   ├── diversity.py       [todo] V                         — Deyvik
-│   │   ├── metabolic.py       [todo] E_met                     — Joohyun
-│   │   ├── barrier.py         [todo] E_bar + projection         — Joohyun
-│   │   └── regularizer.py     [todo] R                         — Joohyun
+│   │   ├── diversity.py       [done] V                         — Deyvik
+│   │   ├── metabolic.py       [done] E_met                     — Joohyun
+│   │   ├── barrier.py         [done] E_bar + projection         — Joohyun
+│   │   └── regularizer.py     [done] R                         — Joohyun
 │   ├── modulator/
 │   │   ├── random_feedback.py [done] fixed random feedback broadcast
 │   │   ├── base.py            [done] CreditContext / CreditResult contract
-│   │   ├── eligibility_shapley.py [todo] φ_i and gains          — William
-│   │   └── shapley_taylor.py  [todo] order-2 credit (stretch)   — William
+│   │   ├── eligibility_shapley.py [done] φ_i and gains          — William
+│   │   └── shapley_taylor.py  [done] order-2 credit (stretch)   — William
 │   └── explain/
-│       ├── attribution.py     [todo] credit loading, masks      — William
-│       ├── metrics.py         [todo] faithfulness, stability, sparsity — William
-│       └── report.py          [todo] `explain` command          — William
+│       ├── attribution.py     [done] credit loading, masks      — William
+│       ├── metrics.py         [done] faithfulness, stability, sparsity — William
+│       └── report.py          [done] `explain` command          — William
 ├── scripts/
-│   ├── run_ablation.sh        [todo] runs the grid              — Joohyun
-│   └── aggregate.py           [todo] summary table + plot       — Deyvik
+│   ├── run_ablation.sh        [done] runs the grid              — Joohyun
+│   └── aggregate.py           [done] summary table + plot       — Deyvik
 └── tests/
     ├── test_model.py          [done] LIF cell, network, encodings
     ├── test_learning_rule.py  [done] eligibility exactness, signals, game step, learning
-    ├── test_diversity.py      [todo] acceptance tests           — Deyvik
-    ├── test_homeostasis.py    [todo] acceptance tests           — Joohyun
-    └── test_credit.py         [todo] acceptance tests           — William
+    ├── test_diversity.py      [done] acceptance tests           — Deyvik
+    ├── test_homeostasis.py    [done] acceptance tests           — Joohyun
+    └── test_credit.py         [done] acceptance tests           — William
 ```
 
 `snn-surrogate-baseline/` is imported for data loaders, seeding, the NVML
@@ -107,13 +114,13 @@ Do not copy those; import them.
 
 ### Conditions (ablation rows, proposal §12.3)
 
-| Condition | Row | Adds | Runs today? |
+| Condition | Row | Adds | Status |
 |---|---|---|---|
-| `three_factor` | 4 | three-factor rule + random feedback | yes |
-| `tf_div` | 5 | + V (DPP log-det) | after Deyvik |
-| `tf_div_energy` | 6 | + E_met + quadratic barrier | after Deyvik + Joohyun |
-| `ng_full` | 7 | + Eligibility-Shapley modulation | after all three |
-| `ng_full_st2` | 7* | Shapley–Taylor credit + log-barrier | stretch |
+| `three_factor` | 4 | three-factor rule + random feedback | runs end to end |
+| `tf_div` | 5 | + V (DPP log-det) | runs end to end |
+| `tf_div_energy` | 6 | + E_met + quadratic barrier | runs end to end |
+| `ng_full` | 7 | + Eligibility-Shapley modulation | runs end to end |
+| `ng_full_st2` | 7* | Shapley–Taylor credit + log-barrier | runs end to end |
 
 Every term can also be switched on by itself on top of `three_factor`, so
 **you can test your part without waiting for the others**:
