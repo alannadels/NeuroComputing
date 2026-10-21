@@ -128,11 +128,12 @@ for s in $SEEDS; do
         echo
         echo "=== [$i/$total] model=$m seed=$s -> $run_dir"
         t0=$(date +%s)
-        "$PYTHON" scripts/run_snn.py --mode train --model "$m" --dataset "$DATASET" \
+        # -u: unbuffered, so train.log and the terminal update after every epoch.
+        "$PYTHON" -u scripts/run_snn.py --mode train --model "$m" --dataset "$DATASET" \
             --device "$DEVICE" --epochs "$EPOCHS" --seed "$s" --run-dir "$run_dir" \
-            ${EXTRA[@]+"${EXTRA[@]}"} > "$run_dir/train.log" 2>&1
-        rc=$?
-        grep -E "^\[(epoch|audit|done)\]" "$run_dir/train.log" | grep -v artifacts
+            ${EXTRA[@]+"${EXTRA[@]}"} 2>&1 | tee "$run_dir/train.log" \
+            | grep --line-buffered -E "^\[(epoch [0-9]+/[0-9]+|audit|done)\]" | grep --line-buffered -v artifacts
+        rc=${PIPESTATUS[0]}
         grep "^RESULT: " "$run_dir/train.log" | sed 's/^RESULT: //' >> "$OUT/results.jsonl"
         if [ "$rc" -ne 0 ]; then
             FAILED+=("$m/seed-$s (exit $rc)")
