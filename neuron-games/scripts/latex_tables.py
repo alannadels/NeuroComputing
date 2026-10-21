@@ -19,13 +19,34 @@ from pathlib import Path
 LABELS = {"bp_snn": "Backprop SNN (BPTT)", "ng_snn": "Neuron Games SNN (no backprop)"}
 
 
-def pm(pair, digits=2, scale=1.0, pct=False):
+def pm(pair, digits=2, scale=1.0, pct=False, bold=False):
     if not pair or pair[0] is None:
         return "--"
     m, s = pair[0] * scale, (pair[1] or 0.0) * scale
     if pct:
         m, s = 100 * m, 100 * s
-    return f"${m:.{digits}f} \\pm {s:.{digits}f}$"
+    body = f"{m:.{digits}f} \\pm {s:.{digits}f}"
+    return f"$\\boldsymbol{{{body}}}$" if bold else f"${body}$"
+
+
+def winners(a, b, better):
+    """(bold_a, bold_b) for two (mean, std) pairs. better: 'max' | 'min' | None.
+    Both are bold when the means differ by less than the larger std (a tie)."""
+    if better is None or not a or not b or a[0] is None or b[0] is None:
+        return False, False
+    if abs(a[0] - b[0]) < max(a[1] or 0.0, b[1] or 0.0) or a[0] == b[0]:
+        return True, True
+    a_wins = a[0] > b[0] if better == "max" else a[0] < b[0]
+    return a_wins, not a_wins
+
+
+def row(label, a, b, better, **fmt):
+    ba, bb = winners(a, b, better)
+    return f"{label} & {pm(a, bold=ba, **fmt)} & {pm(b, bold=bb, **fmt)}"
+
+
+BOLD_NOTE = ("Bold: better value per row; both bold when the difference is smaller than one "
+             "standard deviation.")
 
 
 def table(caption, label, header, rows, colspec):
@@ -70,53 +91,54 @@ def main(argv=None) -> int:
 
     # 1. accuracy + calibration + decision timing
     rows = [
-        f"Test accuracy (\\%) & {pm(B['test_acc'], pct=True)} & {pm(O['test_acc'], pct=True)}",
-        f"Balanced accuracy (\\%) & {pm(B['balanced_acc'], pct=True)} & {pm(O['balanced_acc'], pct=True)}",
-        f"Macro precision (\\%) & {pm(B['macro_precision'], pct=True)} & {pm(O['macro_precision'], pct=True)}",
-        f"Macro recall (\\%) & {pm(B['macro_recall'], pct=True)} & {pm(O['macro_recall'], pct=True)}",
-        f"Macro F1 (\\%) & {pm(B['macro_f1'], pct=True)} & {pm(O['macro_f1'], pct=True)}",
-        f"Best validation accuracy (\\%) & {pm(B['best_val_acc'], pct=True)} & {pm(O['best_val_acc'], pct=True)}",
-        f"Final training accuracy (\\%)$^a$ & {pm(B['final_train_acc'], pct=True)} & {pm(O['final_train_acc'], pct=True)}",
-        f"Best epoch & {pm(B['best_epoch'], 1)} & {pm(O['best_epoch'], 1)}",
+        row("Test accuracy (\\%)", B['test_acc'], O['test_acc'], "max", pct=True),
+        row("Balanced accuracy (\\%)", B['balanced_acc'], O['balanced_acc'], "max", pct=True),
+        row("Macro precision (\\%)", B['macro_precision'], O['macro_precision'], "max", pct=True),
+        row("Macro recall (\\%)", B['macro_recall'], O['macro_recall'], "max", pct=True),
+        row("Macro F1 (\\%)", B['macro_f1'], O['macro_f1'], "max", pct=True),
+        row("Best validation accuracy (\\%)", B['best_val_acc'], O['best_val_acc'], "max", pct=True),
+        row("Final training accuracy (\\%)$^a$", B['final_train_acc'], O['final_train_acc'], None, pct=True),
+        row("Best epoch", B['best_epoch'], O['best_epoch'], None, digits=1),
         "MID",
-        f"ECE, temperature-scaled$^b$ & {pm(B['ts_ece'], 4)} & {pm(O['ts_ece'], 4)}",
-        f"Brier score, temperature-scaled & {pm(B['ts_brier'], 4)} & {pm(O['ts_brier'], 4)}",
-        f"NLL, temperature-scaled & {pm(B['ts_nll'], 4)} & {pm(O['ts_nll'], 4)}",
-        f"Fitted temperature & {pm(B['ts_temperature'], 2)} & {pm(O['ts_temperature'], 2)}",
+        row("ECE, temperature-scaled$^b$", B['ts_ece'], O['ts_ece'], "min", digits=4),
+        row("Brier score, temperature-scaled", B['ts_brier'], O['ts_brier'], "min", digits=4),
+        row("NLL, temperature-scaled", B['ts_nll'], O['ts_nll'], "min", digits=4),
+        row("Fitted temperature", B['ts_temperature'], O['ts_temperature'], None, digits=2),
         "MID",
-        f"Decision step, mean$^c$ & {pm(B['decision_step_mean'], 2)} & {pm(O['decision_step_mean'], 2)}",
-        f"Outputs with no spike (\\%) & {pm(B['no_output_fraction'], pct=True)} & {pm(O['no_output_fraction'], pct=True)}",
+        row("Decision step, mean$^c$", B['decision_step_mean'], O['decision_step_mean'], "min", digits=2),
+        row("Outputs with no spike (\\%)", B['no_output_fraction'], O['no_output_fraction'], "min", pct=True),
         f"Autograd calls in training (per seed) & {B['autograd_calls_in_training'][0]:,} & {O['autograd_calls_in_training'][0]:,}".replace(",", "{,}"),
     ]
     T.append(table(
         f"Accuracy, calibration and decision timing. {setup}. Paired test-accuracy gap "
         f"(no backprop $-$ backprop, same seed): ${100 * gap[0]:.2f} \\pm {100 * gap[1]:.2f}$ points. "
         f"$^a$Running mean over the last epoch. $^b$Probabilities $\\mathrm{{softmax}}(\\text{{spike counts}}/\\tau)$, "
-        f"$\\tau$ fit on the validation split. $^c$Earliest of the 25 steps after which the prediction no longer changes.",
+        f"$\\tau$ fit on the validation split. $^c$Earliest of the 25 steps after which the prediction no longer changes. "
+        f"{BOLD_NOTE}",
         "tab:ng-accuracy", hdr2, rows, col2))
 
     # 2. cost
     rows = [
-        f"Training time, total (s) & {pm(B['train_wall_s'], 1)} & {pm(O['train_wall_s'], 1)}",
-        f"Training time per epoch (s) & {pm(B['train_s_per_epoch'], 2)} & {pm(O['train_s_per_epoch'], 2)}",
-        f"Validation time per epoch (s) & {pm(B['val_s_per_epoch'], 3)} & {pm(O['val_s_per_epoch'], 3)}",
-        f"Training GPU energy (kJ)$^a$ & {pm(B['train_energy_j'], 2, 1e-3)} & {pm(O['train_energy_j'], 2, 1e-3)}",
-        f"Peak GPU memory, training (MiB) & {pm(B['mem_train'], 1)} & {pm(O['mem_train'], 1)}",
-        f"Peak GPU memory, validation (MiB) & {pm(B['mem_val'], 1)} & {pm(O['mem_val'], 1)}",
+        row("Training time, total (s)", B['train_wall_s'], O['train_wall_s'], "min", digits=1),
+        row("Training time per epoch (s)", B['train_s_per_epoch'], O['train_s_per_epoch'], "min", digits=2),
+        row("Validation time per epoch (s)", B['val_s_per_epoch'], O['val_s_per_epoch'], "min", digits=3),
+        row("Training GPU energy (kJ)$^a$", B['train_energy_j'], O['train_energy_j'], "min", digits=2, scale=1e-3),
+        row("Peak GPU memory, training (MiB)", B['mem_train'], O['mem_train'], "min", digits=1),
+        row("Peak GPU memory, validation (MiB)", B['mem_val'], O['mem_val'], "min", digits=1),
         "MID",
-        f"Test inference latency (ms / image) & {pm(B['test_ms_per_image'], 4)} & {pm(O['test_ms_per_image'], 4)}",
-        f"Test inference throughput (images / s) & {pm(B['test_images_per_s'], 0)} & {pm(O['test_images_per_s'], 0)}",
-        f"Inference GPU energy (mJ / image) & {pm(B['inference_energy_per_image_j'], 2, 1e3)} & {pm(O['inference_energy_per_image_j'], 2, 1e3)}",
-        f"Peak GPU memory, test inference (MiB) & {pm(B['mem_test'], 1)} & {pm(O['mem_test'], 1)}",
+        row("Test inference latency (ms / image)", B['test_ms_per_image'], O['test_ms_per_image'], "min", digits=4),
+        row("Test inference throughput (images / s)", B['test_images_per_s'], O['test_images_per_s'], "max", digits=0),
+        row("Inference GPU energy (mJ / image)", B['inference_energy_per_image_j'], O['inference_energy_per_image_j'], "min", digits=2, scale=1e3),
+        row("Peak GPU memory, test inference (MiB)", B['mem_test'], O['mem_test'], "min", digits=1),
         "MID",
-        f"Hidden-layer firing rate, test (\\%)$^b$ & {pm(B['test_hidden_rate'], pct=True)} & {pm(O['test_hidden_rate'], pct=True)}",
-        f"Output-layer firing rate, test (\\%) & {pm(B['test_output_rate'], pct=True)} & {pm(O['test_output_rate'], pct=True)}",
+        row("Hidden-layer firing rate, test (\\%)$^b$", B['test_hidden_rate'], O['test_hidden_rate'], "min", pct=True),
+        row("Output-layer firing rate, test (\\%)", B['test_output_rate'], O['test_output_rate'], None, pct=True),
     ]
     T.append(table(
         f"Training and inference cost on one NVIDIA RTX 5090. {setup}. Times exclude validation unless "
         f"stated; inference is timed after warm-up over the 10{{,}}000 test images (batch 256). "
         f"$^a$GPU-only NVML reading over the whole training loop (includes validation). "
-        f"$^b$Spikes per neuron per time step.",
+        f"$^b$Spikes per neuron per time step (lower is sparser). {BOLD_NOTE}",
         "tab:ng-cost", hdr2, rows, col2))
 
     # 3. time to reach validation accuracy
@@ -125,18 +147,25 @@ def main(argv=None) -> int:
         ro = d["reach"][args.ours][i]
         tgt = 100 * rb["target"]
 
-        def cell(r):
+        def cells(r, bold_e, bold_s):
             if r["epochs"][0] is None:
                 return f"not reached (0/{n})", "--"
             reached = f" ({r['reached']})" if r["reached"] != f"{n}/{n}" else ""
-            return pm(r["epochs"], 1) + reached, pm(r["seconds"], 1)
-        be, bs = cell(rb)
-        oe, os_ = cell(ro)
+            return pm(r["epochs"], 1, bold=bold_e) + reached, pm(r["seconds"], 1, bold=bold_s)
+        reached_b, reached_o = rb["epochs"][0] is not None, ro["epochs"][0] is not None
+        if reached_b and reached_o:
+            be_b, be_o = winners(rb["epochs"], ro["epochs"], "min")
+            bs_b, bs_o = winners(rb["seconds"], ro["seconds"], "min")
+        else:                       # only a model that reached the target can be best
+            be_b = bs_b = reached_b
+            be_o = bs_o = reached_o and not reached_b
+        be, bs = cells(rb, be_b, bs_b)
+        oe, os_ = cells(ro, be_o, bs_o)
         rows.append(f"{tgt:.2f} & {be} & {bs} & {oe} & {os_}")
     T.append(table(
         f"Training epochs and training seconds (validation excluded) until validation accuracy first "
         f"reaches each target. Targets include each model's mean final validation accuracy. "
-        f"Parentheses: seeds that reached the target, when not all did. {setup}.",
+        f"Parentheses: seeds that reached the target, when not all did. {BOLD_NOTE} {setup}.",
         "tab:ng-time-to-accuracy",
         "\\multirow{2}{*}{Target val. acc. (\\%)} & \\multicolumn{2}{c}{" + names[0] + "} & "
         "\\multicolumn{2}{c}{" + names[1] + "} \\\\\n\\cmidrule(lr){2-3}\\cmidrule(lr){4-5}\n"
@@ -149,11 +178,13 @@ def main(argv=None) -> int:
     for t in Ts:
         eb = next(e for e in B["steps_sweep"] if e["T"] == t)
         eo = next(e for e in O["steps_sweep"] if e["T"] == t)
-        rows.append(f"{t} & {pm(eb['acc'], pct=True)} & {pm(eb['ms_per_image'], 4)} & "
-                    f"{pm(eo['acc'], pct=True)} & {pm(eo['ms_per_image'], 4)}")
+        ab, ao = winners(eb["acc"], eo["acc"], "max")
+        lb, lo = winners(eb["ms_per_image"], eo["ms_per_image"], "min")
+        rows.append(f"{t} & {pm(eb['acc'], pct=True, bold=ab)} & {pm(eb['ms_per_image'], 4, bold=lb)} & "
+                    f"{pm(eo['acc'], pct=True, bold=ao)} & {pm(eo['ms_per_image'], 4, bold=lo)}")
     T.append(table(
         f"Test accuracy and inference latency when the trained networks are run for fewer time steps "
-        f"$T$ (trained with $T=25$). {setup}.",
+        f"$T$ (trained with $T=25$). {BOLD_NOTE} {setup}.",
         "tab:ng-steps",
         "\\multirow{2}{*}{$T$} & \\multicolumn{2}{c}{" + names[0] + "} & \\multicolumn{2}{c}{" + names[1] +
         "} \\\\\n\\cmidrule(lr){2-3}\\cmidrule(lr){4-5}\n & Acc. (\\%) & ms / image & Acc. (\\%) & ms / image",
@@ -162,8 +193,8 @@ def main(argv=None) -> int:
     # 5. per-class
     rows = []
     for c in range(len(B["per_class_accuracy"])):
-        rows.append(f"{c} & {pm(B['per_class_accuracy'][c], pct=True)} & {pm(O['per_class_accuracy'][c], pct=True)}")
-    T.append(table(f"Per-class test accuracy (recall, \\%). {setup}.", "tab:ng-per-class",
+        rows.append(row(str(c), B['per_class_accuracy'][c], O['per_class_accuracy'][c], "max", pct=True))
+    T.append(table(f"Per-class test accuracy (recall, \\%). {BOLD_NOTE} {setup}.", "tab:ng-per-class",
                    "Digit & " + " & ".join(names), rows, col2))
 
     # 6. explainability
@@ -176,13 +207,15 @@ def main(argv=None) -> int:
             f"Remove bottom-{k} credit & {pm(B['explain']['remove_bottom_k'], pct=True)} & {pm(O['explain']['remove_bottom_k'], pct=True)}",
             "MID",
             f"Credit Gini coefficient & {pm(B['explain']['gini'], 3)} & {pm(O['explain']['gini'], 3)}",
-            f"Credit stability (Spearman, last two epochs) & {pm(B['explain']['stability_spearman'], 3)} & {pm(O['explain']['stability_spearman'], 3)}",
+            row("Credit stability (Spearman, last two epochs)", B['explain']['stability_spearman'],
+                O['explain']['stability_spearman'], "max", digits=3),
         ]
         T.append(table(
             f"Eligibility-Shapley faithfulness on the 128 hidden neurons: test accuracy (\\%) after silencing "
             f"$k={k}$ neurons chosen by credit $\\varphi_i = \\langle G_i, \\Delta W_i^{{(n-1)}} \\rangle$ "
             f"($G$: negative gradient of each model's own training objective). Faithful credit would make "
-            f"top-$k$ removal the most damaging. {setup}.",
+            f"top-$k$ removal the most damaging; removal rows are compared within a column, so only "
+            f"stability is bolded. {BOLD_NOTE} {setup}.",
             "tab:ng-explain", hdr2, rows, col2))
 
     tex = "\n".join(T)
