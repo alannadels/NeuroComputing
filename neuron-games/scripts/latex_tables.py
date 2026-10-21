@@ -30,23 +30,30 @@ def pm(pair, digits=2, scale=1.0, pct=False, bold=False):
 
 
 def winners(a, b, better):
-    """(bold_a, bold_b) for two (mean, std) pairs. better: 'max' | 'min' | None.
-    Both are bold when the means differ by less than the larger std (a tie)."""
-    if better is None or not a or not b or a[0] is None or b[0] is None:
+    """(bold_a, bold_b) for two (mean, std) pairs: exactly one winner, the better
+    unrounded mean. better: 'max' | 'min' | None (no winner)."""
+    if better is None or not a or not b or a[0] is None or b[0] is None or a[0] == b[0]:
         return False, False
-    if abs(a[0] - b[0]) < max(a[1] or 0.0, b[1] or 0.0) or a[0] == b[0]:
-        return True, True
     a_wins = a[0] > b[0] if better == "max" else a[0] < b[0]
     return a_wins, not a_wins
 
 
+def within_noise(a, b) -> bool:
+    """True when the means differ by less than the larger standard deviation."""
+    if not a or not b or a[0] is None or b[0] is None:
+        return False
+    return abs(a[0] - b[0]) < max(a[1] or 0.0, b[1] or 0.0)
+
+
 def row(label, a, b, better, **fmt):
     ba, bb = winners(a, b, better)
+    if better is not None and within_noise(a, b):
+        label += "$^\\dagger$"
     return f"{label} & {pm(a, bold=ba, **fmt)} & {pm(b, bold=bb, **fmt)}"
 
 
-BOLD_NOTE = ("Bold: better value per row; both bold when the difference is smaller than one "
-             "standard deviation.")
+BOLD_NOTE = ("Bold: better mean per row. $^\\dagger$Difference smaller than one standard "
+             "deviation.")
 
 
 def table(caption, label, header, rows, colspec):
@@ -151,7 +158,10 @@ def main(argv=None) -> int:
             if r["epochs"][0] is None:
                 return f"not reached (0/{n})", "--"
             reached = f" ({r['reached']})" if r["reached"] != f"{n}/{n}" else ""
-            return pm(r["epochs"], 1, bold=bold_e) + reached, pm(r["seconds"], 1, bold=bold_s)
+            dag_e = "$^\\dagger$" if bold_e and within_noise(rb["epochs"], ro["epochs"]) else ""
+            dag_s = "$^\\dagger$" if bold_s and within_noise(rb["seconds"], ro["seconds"]) else ""
+            return (pm(r["epochs"], 1, bold=bold_e) + dag_e + reached,
+                    pm(r["seconds"], 1, bold=bold_s) + dag_s)
         reached_b, reached_o = rb["epochs"][0] is not None, ro["epochs"][0] is not None
         if reached_b and reached_o:
             be_b, be_o = winners(rb["epochs"], ro["epochs"], "min")
@@ -180,8 +190,12 @@ def main(argv=None) -> int:
         eo = next(e for e in O["steps_sweep"] if e["T"] == t)
         ab, ao = winners(eb["acc"], eo["acc"], "max")
         lb, lo = winners(eb["ms_per_image"], eo["ms_per_image"], "min")
-        rows.append(f"{t} & {pm(eb['acc'], pct=True, bold=ab)} & {pm(eb['ms_per_image'], 4, bold=lb)} & "
-                    f"{pm(eo['acc'], pct=True, bold=ao)} & {pm(eo['ms_per_image'], 4, bold=lo)}")
+        da = "$^\\dagger$" if within_noise(eb["acc"], eo["acc"]) else ""
+        dl = "$^\\dagger$" if within_noise(eb["ms_per_image"], eo["ms_per_image"]) else ""
+        rows.append(f"{t} & {pm(eb['acc'], pct=True, bold=ab)}{da if ab else ''} & "
+                    f"{pm(eb['ms_per_image'], 4, bold=lb)}{dl if lb else ''} & "
+                    f"{pm(eo['acc'], pct=True, bold=ao)}{da if ao else ''} & "
+                    f"{pm(eo['ms_per_image'], 4, bold=lo)}{dl if lo else ''}")
     T.append(table(
         f"Test accuracy and inference latency when the trained networks are run for fewer time steps "
         f"$T$ (trained with $T=25$). {BOLD_NOTE} {setup}.",
