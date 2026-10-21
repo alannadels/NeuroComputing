@@ -96,7 +96,7 @@ with the full metric suite and a report.
 ### 1. Requirements
 
 - Python 3.12 and an NVIDIA GPU with CUDA 12.8 support (the reported results
-  are from an RTX 5090). CPU and Apple Silicon also work for small runs.
+  are from a single recent NVIDIA GPU). CPU and Apple Silicon also work for small runs.
 - About 1 GB free disk for MNIST and run outputs.
 - Internet access on the first run (MNIST downloads automatically to
   `neuron-games/data/raw/`).
@@ -141,7 +141,7 @@ Every command below is run from `neuron-games/`.
 The script:
 
 1. runs the test suite and checks the GPU (aborts before training if either fails);
-2. records the git commit, GPU, driver and package versions in `<out>/env/`;
+2. records the git commit, GPU model, driver and package versions in `<out>/env/`;
 3. for each seed, trains `bp_snn` then `ng_snn` for 50 epochs and evaluates the
    best-validation checkpoint once on the test set; with several seeds, the
    first seed finishes for both models first and gets an interim report;
@@ -151,7 +151,7 @@ The script:
 
 It exits non-zero if any run fails, and the report fails if the no-backprop
 model made a single autograd call during training. Expect about 6.5 minutes
-per model per seed on an RTX 5090 (about 40 minutes for 3 seeds).
+per model per seed on a single recent NVIDIA GPU (about 40 minutes for 3 seeds).
 
 Options: `--dataset mnist|fashion_mnist`, `--epochs N`, `--seeds "..."`,
 `--models "bp_snn ng_snn"` (any two of `bp_snn`, `ng_snn`, `three_factor`,
@@ -236,7 +236,7 @@ back silently.
 
 ## Results so far
 
-MNIST, 50 epochs, 3 seeds, RTX 5090 (full tables:
+MNIST, 50 epochs, 3 seeds, single NVIDIA GPU (full tables:
 `neuron-games/docs/experiments/results_mnist_3seeds_2026-10-21.tex`):
 
 | | backprop SNN | no-backprop SNN (Neuron Games) |

@@ -142,7 +142,7 @@ def main(argv=None) -> int:
         row("Output-layer firing rate, test (\\%)", B['test_output_rate'], O['test_output_rate'], None, pct=True),
     ]
     T.append(table(
-        f"Training and inference cost on one NVIDIA RTX 5090. {setup}. Times exclude validation unless "
+        f"Training and inference cost on a single NVIDIA GPU. {setup}. Times exclude validation unless "
         f"stated; inference is timed after warm-up over the 10{{,}}000 test images (batch 256). "
         f"$^a$GPU-only NVML reading over the whole training loop (includes validation). "
         f"$^b$Spikes per neuron per time step (lower is sparser). {BOLD_NOTE}",

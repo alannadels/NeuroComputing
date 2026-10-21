@@ -116,7 +116,22 @@ fi
     echo "git_dirty_files: $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
     echo "args: dataset=$DATASET epochs=$EPOCHS seeds=[$SEEDS] models=[$MODELS] device=$DEVICE extra=[${EXTRA[*]:-}]"
 } > "$OUT/env/run_info.txt"
-(nvidia-smi 2>/dev/null || /usr/lib/wsl/lib/nvidia-smi 2>/dev/null) > "$OUT/env/nvidia-smi.txt"
+"$PYTHON" - > "$OUT/env/gpu.txt" 2>/dev/null <<'PY' || echo "(GPU details unavailable)" > "$OUT/env/gpu.txt"
+import torch
+print("torch:", torch.__version__, "| cuda:", torch.version.cuda, "| cudnn:", torch.backends.cudnn.version())
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        p = torch.cuda.get_device_properties(i)
+        print(f"gpu {i}: {p.name} | {p.total_memory / 2**30:.1f} GiB | compute {p.major}.{p.minor}")
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        print("driver:", pynvml.nvmlSystemGetDriverVersion())
+    except Exception as e:
+        print("driver: unavailable", e)
+else:
+    print("no CUDA device")
+PY
 "$PYTHON" -m pip freeze > "$OUT/env/packages.txt" 2>/dev/null \
     || "$HOME/.local/bin/uv" pip freeze --python "$PYTHON" > "$OUT/env/packages.txt" 2>/dev/null \
     || echo "(package list unavailable)" > "$OUT/env/packages.txt"
