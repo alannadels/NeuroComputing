@@ -31,7 +31,7 @@
 set -uo pipefail
 
 DATASET="mnist"
-EPOCHS="25"
+EPOCHS="50"
 SEEDS="1"
 MODELS="bp_snn ng_snn"
 DEVICE="cuda"

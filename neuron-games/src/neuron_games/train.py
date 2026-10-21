@@ -49,6 +49,44 @@ def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
     raise ValueError(f"unknown optimizer {cfg.optimizer!r}")
 
 
+class PlateauHalving:
+    """Multiply the LR by cfg.lr_factor once val accuracy has gone
+    cfg.lr_patience epochs without a new best; the counter then resets.
+    Floor: cfg.lr * cfg.lr_min_factor. Same rule for every learning rule; for
+    the three-factor rule it scales eta in dW = -eta * sum_t m e (eq. 3)."""
+
+    def __init__(self, optimizer: torch.optim.Optimizer, cfg: NGRunConfig):
+        self.opt, self.cfg = optimizer, cfg
+        self.best = -1.0
+        self.bad_epochs = 0
+        self.min_lr = cfg.lr * cfg.lr_min_factor
+        self.reductions = 0
+
+    @property
+    def lr(self) -> float:
+        return self.opt.param_groups[0]["lr"]
+
+    def step(self, val_acc: float) -> bool:
+        """Call once per epoch after validation. Returns True if the LR was cut."""
+        if self.cfg.lr_schedule == "none":
+            return False
+        if val_acc > self.best:
+            self.best, self.bad_epochs = val_acc, 0
+            return False
+        self.bad_epochs += 1
+        if self.bad_epochs < self.cfg.lr_patience or self.lr <= self.min_lr:
+            return False
+        for g in self.opt.param_groups:
+            g["lr"] = max(g["lr"] * self.cfg.lr_factor, self.min_lr)
+        self.bad_epochs = 0
+        self.reductions += 1
+        return True
+
+    def state_dict(self) -> dict:
+        return {"best": self.best, "bad_epochs": self.bad_epochs, "reductions": self.reductions,
+                "lr": self.lr}
+
+
 def credit_layers_of(cfg: NGRunConfig, n_layers: int) -> list[int]:
     return list(range(n_layers - 1)) if cfg.credit_layers == "hidden" else list(range(n_layers))
 
@@ -201,6 +239,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
     optimizer = build_optimizer(net, cfg)
     game = NeuronGame(net, cfg, device) if cfg.learning_rule == "three_factor" else None
     bp_state = {"prev_delta_w": [None] * len(net.layers), "prev_phi": None}
+    schedule = PlateauHalving(optimizer, cfg)
     n_layers = len(net.layers)
 
     # Key names match neuron_baseline so its plotting code works unchanged.
@@ -231,6 +270,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         "epoch_credit_per_neuron": [],   # [epoch][layer] -> list[N_l] or None
         "epoch_phi_ref":        [],      # Phi under the shared reference spec
         "epoch_phi_ref_components": [],
+        "epoch_lr":             [],      # learning rate used during the epoch
     }
     best_val_acc = -1.0
 
@@ -289,6 +329,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         history["epoch_credit_per_neuron"].append(ep["credit_mean"])
         history["epoch_phi_ref"].append(ref["phi"])
         history["epoch_phi_ref_components"].append(ref["components"])
+        history["epoch_lr"].append(schedule.lr)
 
         mem_log = ""
         if train_mem["allocated"] is not None:
@@ -298,10 +339,14 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
               f"train_acc={history['epoch_train_acc'][-1]:.4f} "
               f"val_loss={val['loss']:.4f} val_acc={val['accuracy']:.4f} "
               f"phi_ref={ref['phi']:.4f} rate(h,o)=({rates[0]:.3f},{rates[-1]:.3f}) "
-              f"time(train,val)=({train_s:.1f}s,{val_s:.2f}s){mem_log}")
+              f"lr={schedule.lr:.4g} time(train,val)=({train_s:.1f}s,{val_s:.2f}s){mem_log}")
+        if schedule.step(val["accuracy"]):
+            print(f"[lr] no val improvement for {cfg.lr_patience} epochs: "
+                  f"learning rate -> {schedule.lr:.4g}")
 
         t3 = time.perf_counter()
         game_extra = game.state_dict() if game is not None else {}
+        game_extra["lr_schedule"] = schedule.state_dict()
         save_checkpoint(run_dir / "checkpoints" / "last.pt",
                         net, optimizer, cfg, epoch + 1, val["accuracy"], extra=game_extra)
         if val["accuracy"] > best_val_acc:

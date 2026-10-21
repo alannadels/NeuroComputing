@@ -111,6 +111,8 @@ def summarize(runs: list[dict]) -> dict:
         "final_val_acc": _ms(col(lambda r: r["history"]["epoch_val_acc"][-1])),
         "final_train_acc": _ms(col(lambda r: r["history"]["epoch_train_acc"][-1])),
         "best_epoch": _ms(col(lambda r: r["meta"].get("best_epoch"))),
+        "lr_reductions": _ms(col(lambda r: r["meta"]["lr_schedule"]["reductions"])),
+        "final_lr": _ms(col(lambda r: r["meta"]["lr_schedule"]["final_lr"])),
         "balanced_acc": _ms(col(lambda r: det(r, "balanced_accuracy"))),
         "macro_precision": _ms(col(lambda r: det(r, "macro_precision"))),
         "macro_recall": _ms(col(lambda r: det(r, "macro_recall"))),
@@ -346,6 +348,8 @@ def main(argv=None) -> int:
         ("final-epoch val accuracy", "final_val_acc", 4, 1.0),
         ("final-epoch train accuracy (running)", "final_train_acc", 4, 1.0),
         ("best epoch", "best_epoch", 1, 1.0),
+        ("learning-rate halvings", "lr_reductions", 1, 1.0),
+        ("final learning rate", "final_lr", 5, 1.0),
     ])
     table("Calibration", [
         ("ECE, temperature-scaled (15 bins)", "ts_ece", 4, 1.0),

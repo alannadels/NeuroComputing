@@ -132,6 +132,13 @@ class NGRunConfig:
     optimizer: str = "adam"               # sgd matches eq. 3 (dW = eta * int m e dt); adam for BPTT
     lr: float = 1e-3
     momentum: float = 0.0                 # sgd only
+    # LR schedule, identical for every model: halve the learning rate once val
+    # accuracy has gone lr_patience epochs without a new best (counter then
+    # resets); never below lr * lr_min_factor. "none" keeps it constant.
+    lr_schedule: str = "plateau"          # plateau | none
+    lr_factor: float = 0.5
+    lr_patience: int = 5
+    lr_min_factor: float = 1.0 / 64.0
     adam_betas: tuple[float, float] = (0.9, 0.999)
     epochs: int = 1
     batch_size: int = 128
@@ -172,6 +179,7 @@ class NGRunConfig:
         _check("barrier", self.barrier, BARRIERS)
         _check("credit", self.credit, CREDIT)
         _check("credit_layers", self.credit_layers, ("hidden", "all"))
+        _check("lr_schedule", self.lr_schedule, ("plateau", "none"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"

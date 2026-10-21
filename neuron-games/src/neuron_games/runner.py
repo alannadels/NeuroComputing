@@ -141,6 +141,12 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
                           "beta": cfg.beta, "mu": cfg.mu, "lam": cfg.lam},
             "arch": f"fc-{cfg.n_in}-{cfg.n_hidden}-{cfg.n_out}",
             "best_epoch": ckpt["epoch"],
+            "lr_schedule": {"kind": cfg.lr_schedule, "factor": cfg.lr_factor,
+                            "patience": cfg.lr_patience, "min_lr": cfg.lr * cfg.lr_min_factor,
+                            "initial_lr": cfg.lr, "final_lr": out["history"]["epoch_lr"][-1],
+                            "reductions": sum(1 for a, b in zip(out["history"]["epoch_lr"],
+                                                                out["history"]["epoch_lr"][1:])
+                                              if b < a)},
         },
         "history": out["history"],
         "best_val_accuracy": out["best_val_acc"],

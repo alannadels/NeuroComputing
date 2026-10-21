@@ -113,3 +113,27 @@ def test_fit_temperature_recovers_scale() -> None:
     target = torch.distributions.Categorical(logits=logits).sample()
     # data generated with softmax(logits); give the fitter logits scaled by 4 -> tau ~ 4
     assert fit_temperature(logits * 4.0, target) == pytest.approx(4.0, rel=0.1)
+
+
+def test_plateau_halving_rule() -> None:
+    from neuron_games.train import PlateauHalving
+    cfg = NGRunConfig.for_condition("three_factor", device="cpu", lr=1.0, lr_patience=5,
+                                    lr_factor=0.5, lr_min_factor=0.25)
+    w = torch.nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([w], lr=1.0)
+    s = PlateauHalving(opt, cfg)
+    lrs = []
+    # improves twice, then flat: halve on the 5th non-improving epoch, reset, halve again, floor
+    for acc in [0.5, 0.6] + [0.6] * 15:
+        s.step(acc)
+        lrs.append(s.lr)
+    assert lrs[:6] == [1.0] * 6                 # epochs 3-6: 4 non-improving epochs, no cut yet
+    assert lrs[6] == 0.5                        # 5th non-improving epoch -> halve
+    assert lrs[7:11] == [0.5] * 4
+    assert lrs[11] == 0.25                      # next 5 bad epochs -> halve again (hits floor)
+    assert lrs[-1] == 0.25 and s.reductions == 2  # floor 1.0 * 0.25 holds
+    cfg_none = NGRunConfig.for_condition("three_factor", device="cpu", lr=1.0, lr_schedule="none")
+    s2 = PlateauHalving(torch.optim.SGD([w], lr=1.0), cfg_none)
+    for _ in range(20):
+        s2.step(0.1)
+    assert s2.lr == 1.0
