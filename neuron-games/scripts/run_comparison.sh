@@ -9,9 +9,8 @@
 #                             [--skip-tests] [--skip-explain]
 #                             [-- extra run_snn.py args, e.g. --set beta=1e-3]
 #
-# On alans-pc, queue it as one GPU job (task-spooler, one job at a time):
-#   train ~/research/Neuro_Computing/neuron-games/scripts/run_comparison.sh
-#   q / jlog <id> / jkill <id>
+# On a shared GPU machine, run it inside tmux (or a job queue) so it survives a
+# disconnect.
 #
 # Steps:
 #   1. preflight: python + torch + device, then the test suite (aborts on failure)
@@ -27,8 +26,7 @@
 # In phase 2 a failed run does not stop the others; failures are listed at the
 # end and the script exits 1. The comparison report fails (exit 2) if the no-backprop runs
 # made any autograd call during training. PYTHON overrides the interpreter
-# (default: the active virtualenv, else ~/ml/venvs/base/bin/python if present,
-# else python3).
+# (default: the active virtualenv, else python3).
 set -uo pipefail
 
 DATASET="mnist"
@@ -42,7 +40,7 @@ SKIP_EXPLAIN=0
 FIRST_SEED_ONLY=0
 EXTRA=()
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "run_comparison.sh: $*" >&2; exit 2; }
 
 while [ $# -gt 0 ]; do
@@ -75,7 +73,6 @@ cd "$(dirname "$0")/.." || die "cannot cd to neuron-games/"
 NG_ROOT="$(pwd)"
 if [ -z "${PYTHON:-}" ]; then
     if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then PYTHON="$VIRTUAL_ENV/bin/python"
-    elif [ -x "$HOME/ml/venvs/base/bin/python" ]; then PYTHON="$HOME/ml/venvs/base/bin/python"
     else PYTHON="python3"; fi
 fi
 [ -n "$OUT" ] || OUT="runs/compare-${DATASET}-$(date +%Y%m%d-%H%M%S)"
