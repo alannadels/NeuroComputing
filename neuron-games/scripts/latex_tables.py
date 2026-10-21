@@ -3,6 +3,7 @@
 Usage (from neuron-games/):
     python scripts/latex_tables.py runs/compare-<...>/comparison.json [-o results.tex]
         [--ours ng_snn] [--baseline bp_snn] [--dataset MNIST] [--epochs 50]
+        [--gpu "one NVIDIA RTX 5090"]
 
 Writes a standalone-includable .tex fragment (needs \\usepackage{booktabs},
 \\usepackage{multirow} and \\usepackage{amsmath} in the preamble) with:
@@ -74,6 +75,8 @@ def main(argv=None) -> int:
     p.add_argument("--baseline", default="bp_snn")
     p.add_argument("--dataset", default="MNIST")
     p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--gpu", default="a single NVIDIA GPU",
+                   help='hardware named in the cost caption, e.g. "one NVIDIA RTX 5090"')
     args = p.parse_args(argv)
 
     d = json.loads(args.comparison_json.read_text())
@@ -142,7 +145,7 @@ def main(argv=None) -> int:
         row("Output-layer firing rate, test (\\%)", B['test_output_rate'], O['test_output_rate'], None, pct=True),
     ]
     T.append(table(
-        f"Training and inference cost on a single NVIDIA GPU. {setup}. Times exclude validation unless "
+        f"Training and inference cost, obtained on {args.gpu}. {setup}. Times exclude validation unless "
         f"stated; inference is timed after warm-up over the 10{{,}}000 test images (batch 256). "
         f"$^a$GPU-only NVML reading over the whole training loop (includes validation). "
         f"$^b$Spikes per neuron per time step (lower is sparser). {BOLD_NOTE}",

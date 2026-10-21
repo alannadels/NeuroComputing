@@ -95,8 +95,9 @@ with the full metric suite and a report.
 
 ### 1. Requirements
 
-- Python 3.12 and an NVIDIA GPU with CUDA 12.8 support (the reported results
-  are from a single recent NVIDIA GPU). CPU and Apple Silicon also work for small runs.
+- Python 3.12 and an NVIDIA GPU with CUDA 12.8 support. Any recent NVIDIA GPU
+  works; the reported results were obtained on a single NVIDIA RTX 5090. CPU and
+  Apple Silicon also work for small runs.
 - About 1 GB free disk for MNIST and run outputs.
 - Internet access on the first run (MNIST downloads automatically to
   `neuron-games/data/raw/`).
@@ -151,7 +152,8 @@ The script:
 
 It exits non-zero if any run fails, and the report fails if the no-backprop
 model made a single autograd call during training. Expect about 6.5 minutes
-per model per seed on a single recent NVIDIA GPU (about 40 minutes for 3 seeds).
+per model per seed on the RTX 5090 the results were obtained on (about 40
+minutes for 3 seeds); slower GPUs take proportionally longer.
 
 Options: `--dataset mnist|fashion_mnist`, `--epochs N`, `--seeds "..."`,
 `--models "bp_snn ng_snn"` (any two of `bp_snn`, `ng_snn`, `three_factor`,
@@ -214,7 +216,8 @@ Metrics, identical for every model:
 ### 6. LaTeX tables
 
 ```bash
-python scripts/latex_tables.py runs/<compare-dir>/comparison.json -o docs/experiments/<name>.tex
+python scripts/latex_tables.py runs/<compare-dir>/comparison.json -o docs/experiments/<name>.tex \
+    --gpu "one NVIDIA RTX 5090"      # hardware named in the cost-table caption
 ```
 
 Requires `\usepackage{booktabs,multirow,amsmath}`. The tables for the
@@ -236,7 +239,7 @@ back silently.
 
 ## Results so far
 
-MNIST, 50 epochs, 3 seeds, single NVIDIA GPU (full tables:
+MNIST, 50 epochs, 3 seeds, obtained on a single NVIDIA RTX 5090 (full tables:
 `neuron-games/docs/experiments/results_mnist_3seeds_2026-10-21.tex`):
 
 | | backprop SNN | no-backprop SNN (Neuron Games) |

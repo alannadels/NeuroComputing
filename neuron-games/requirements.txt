@@ -1,5 +1,6 @@
 # Environment the 2026-10-21 MNIST comparison ran on (Python 3.12.3, CUDA 12.8,
-# single NVIDIA GPU). Install PyTorch from the CUDA 12.8 index first:
+# NVIDIA RTX 5090; any recent NVIDIA GPU works). Install PyTorch from the CUDA 12.8
+# index first:
 #   uv pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchvision==0.26.0
 # then the rest:
 #   uv pip install -r requirements.txt
