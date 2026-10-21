@@ -3,9 +3,10 @@
 # backprop SNN (bp_snn): same network, data split, encoding, loss and seeds.
 #
 # Usage (from anywhere; paths resolve to neuron-games/):
-#   scripts/run_comparison.sh [--dataset mnist|fashion_mnist] [--epochs N] [--seeds "1 2 3"]
+#   scripts/run_comparison.sh [--dataset mnist|fashion_mnist] [--epochs N] [--seeds "1"]
 #                             [--models "bp_snn ng_snn"] [--device cuda|mps|cpu]
-#                             [--out runs/compare-<dataset>-<ts>] [--skip-tests] [--skip-explain]
+#                             [--out runs/compare-<dataset>-<ts>] [--first-seed-only]
+#                             [--skip-tests] [--skip-explain]
 #                             [-- extra run_snn.py args, e.g. --set beta=1e-3]
 #
 # On alans-pc, queue it as one GPU job (task-spooler, one job at a time):
@@ -15,28 +16,32 @@
 # Steps:
 #   1. preflight: python + torch + device, then the test suite (aborts on failure)
 #   2. environment record: git commit, GPU/driver, package versions -> <out>/env/
-#   3. for each seed, each model: scripts/run_snn.py (train, test eval on best.pt)
+#   3. phase 1 - single seed: both models on the first seed, explain. With more
+#      seeds, an interim report <out>/comparison_seed-<s>.{md,json}; stops here if
+#      either run failed, or with --first-seed-only. Default is one seed (seed 1).
+#   4. phase 2 - remaining seeds: both models on each, explain.
+#   5. final report over all seeds: <out>/comparison.{md,json}, plots
+#   Each run: scripts/run_snn.py (train, test eval on best.pt)
 #      -> <out>/<model>/seed-<s>/{results.json,config.json,checkpoints/,plots/,train.log}
-#   4. explain report on every run that logged credit (no-backprop runs)
-#   5. scripts/compare_report.py -> <out>/comparison.{md,json}, plots
 #
-# A failed run does not stop the others; failures are listed at the end and the
-# script exits 1. The comparison report fails (exit 2) if the no-backprop runs
+# In phase 2 a failed run does not stop the others; failures are listed at the
+# end and the script exits 1. The comparison report fails (exit 2) if the no-backprop runs
 # made any autograd call during training. PYTHON overrides the interpreter
 # (default: ~/ml/venvs/base/bin/python if present, else python3).
 set -uo pipefail
 
 DATASET="mnist"
 EPOCHS="25"
-SEEDS="1 2 3"
+SEEDS="1"
 MODELS="bp_snn ng_snn"
 DEVICE="cuda"
 OUT=""
 SKIP_TESTS=0
 SKIP_EXPLAIN=0
+FIRST_SEED_ONLY=0
 EXTRA=()
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "run_comparison.sh: $*" >&2; exit 2; }
 
 while [ $# -gt 0 ]; do
@@ -54,6 +59,7 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --skip-tests) SKIP_TESTS=1; shift ;;
         --skip-explain) SKIP_EXPLAIN=1; shift ;;
+        --first-seed-only) FIRST_SEED_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; EXTRA=("$@"); break ;;
         *) usage >&2; die "unknown argument: $1" ;;
@@ -75,6 +81,7 @@ if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
 fi
 mkdir -p "$OUT/env" || die "cannot create $OUT"
 SUMMARY_LOG="$OUT/run_comparison.log"
+exec 3>&1                     # fd 3 = the terminal: progress bars go here, not into the logs
 exec > >(tee -a "$SUMMARY_LOG") 2>&1
 
 STARTED=$(date +%s)
@@ -114,69 +121,110 @@ fi
     || "$HOME/.local/bin/uv" pip freeze --python "$PYTHON" > "$OUT/env/packages.txt" 2>/dev/null \
     || echo "(package list unavailable)" > "$OUT/env/packages.txt"
 
-# --- 3. training + test evaluation -------------------------------------------------
-n_seeds=$(echo $SEEDS | wc -w | tr -d ' ')
+# --- 3-5. runs, explain, reports ------------------------------------------------------
+set -- $SEEDS
+FIRST_SEED="$1"; shift
+REST_SEEDS="$*"
+[ "$FIRST_SEED_ONLY" -eq 1 ] && REST_SEEDS=""
 n_models=$(echo $MODELS | wc -w | tr -d ' ')
-total=$((n_seeds * n_models))
+n_rest=$(echo $REST_SEEDS | wc -w | tr -d ' ')
+total=$(( (1 + n_rest) * n_models ))
 i=0
 FAILED=()
-for s in $SEEDS; do
-    for m in $MODELS; do
-        i=$((i + 1))
-        run_dir="$OUT/$m/seed-$s"
-        mkdir -p "$run_dir"
-        echo
-        echo "=== [$i/$total] model=$m seed=$s -> $run_dir"
-        t0=$(date +%s)
-        # -u: unbuffered, so train.log and the terminal update after every epoch.
-        "$PYTHON" -u scripts/run_snn.py --mode train --model "$m" --dataset "$DATASET" \
-            --device "$DEVICE" --epochs "$EPOCHS" --seed "$s" --run-dir "$run_dir" \
-            ${EXTRA[@]+"${EXTRA[@]}"} 2>&1 | tee "$run_dir/train.log" \
-            | grep --line-buffered -E "^\[(epoch [0-9]+/[0-9]+|audit|done)\]" | grep --line-buffered -v artifacts
-        rc=${PIPESTATUS[0]}
-        grep "^RESULT: " "$run_dir/train.log" | sed 's/^RESULT: //' >> "$OUT/results.jsonl"
-        if [ "$rc" -ne 0 ]; then
-            FAILED+=("$m/seed-$s (exit $rc)")
-            echo "[compare] FAILED: $m/seed-$s (exit $rc); last lines of $run_dir/train.log:"
-            tail -15 "$run_dir/train.log"
-        else
-            echo "[compare] ok: $m/seed-$s in $(( $(date +%s) - t0 ))s"
-        fi
-    done
-done
+set -- $MODELS
+BASELINE_MODEL="${1:-}"; OURS_MODEL="${2:-}"; N_MODELS=$#
 
-# --- 4. explainability on runs that logged credit -----------------------------------
-if [ "$SKIP_EXPLAIN" -eq 0 ]; then
-    for m in $MODELS; do
-        for s in $SEEDS; do
-            run_dir="$OUT/$m/seed-$s"
-            [ -f "$run_dir/results.json" ] || continue
-            "$PYTHON" - "$run_dir/results.json" <<'PY' || continue
+run_one() {   # model seed
+    local m="$1" s="$2" run_dir="$OUT/$1/seed-$2" t0 rc
+    i=$((i + 1))
+    mkdir -p "$run_dir"
+    echo
+    echo "=== [$i/$total] model=$m seed=$s -> $run_dir"
+    t0=$(date +%s)
+    # -u: unbuffered, so train.log and the terminal update after every epoch.
+    NG_PROGRESS_FD=3 "$PYTHON" -u scripts/run_snn.py --mode train --model "$m" --dataset "$DATASET" \
+        --device "$DEVICE" --epochs "$EPOCHS" --seed "$s" --run-dir "$run_dir" --progress \
+        ${EXTRA[@]+"${EXTRA[@]}"} 2>&1 | tee "$run_dir/train.log" \
+        | grep --line-buffered -E "^\[(epoch [0-9]+/[0-9]+|audit|done)\]" | grep --line-buffered -v artifacts
+    rc=${PIPESTATUS[0]}
+    grep "^RESULT: " "$run_dir/train.log" | sed 's/^RESULT: //' >> "$OUT/results.jsonl"
+    if [ "$rc" -ne 0 ]; then
+        FAILED+=("$m/seed-$s (exit $rc)")
+        echo "[compare] FAILED: $m/seed-$s (exit $rc); last lines of $run_dir/train.log:"
+        tail -15 "$run_dir/train.log"
+        return 1
+    fi
+    echo "[compare] ok: $m/seed-$s in $(( $(date +%s) - t0 ))s"
+}
+
+explain_one() {   # model seed: only runs that logged credit (no-backprop runs)
+    local run_dir="$OUT/$1/seed-$2"
+    [ "$SKIP_EXPLAIN" -eq 0 ] && [ -f "$run_dir/results.json" ] || return 0
+    "$PYTHON" - "$run_dir/results.json" <<'PY' || return 0
 import json, sys
 meta = json.load(open(sys.argv[1]))["meta"]
 sys.exit(0 if meta.get("potential", {}).get("credit", "none") != "none" else 1)
 PY
-            echo "[explain] $run_dir"
-            PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m neuron_games explain \
-                --run "$run_dir" --device "$DEVICE" > "$run_dir/explain.log" 2>&1 \
-                || { echo "[explain] FAILED for $run_dir"; tail -5 "$run_dir/explain.log"; }
+    echo "[explain] $run_dir"
+    PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m neuron_games explain \
+        --run "$run_dir" --device "$DEVICE" > "$run_dir/explain.log" 2>&1 \
+        || { echo "[explain] FAILED for $run_dir"; tail -5 "$run_dir/explain.log"; }
+}
+
+report() {   # [suffix]: "" -> comparison.*, "_seed-1" -> comparison_seed-1.*
+    local suffix="$1" rc=0 f
+    if [ "$N_MODELS" -ne 2 ]; then
+        echo "[compare] compare_report.py needs exactly two models (got: $MODELS); skipping"
+        return 0
+    fi
+    echo
+    "$PYTHON" scripts/compare_report.py "$OUT" --baseline "$BASELINE_MODEL" --ours "$OURS_MODEL" || rc=$?
+    if [ -n "$suffix" ]; then
+        for f in comparison.md comparison.json val_acc_vs_epoch.png val_acc_vs_time.png; do
+            [ -f "$OUT/$f" ] && mv "$OUT/$f" "$OUT/${f%.*}${suffix}.${f##*.}"
         done
-    done
-fi
+    fi
+    return $rc
+}
 
-# --- 5. head-to-head report ------------------------------------------------------
+# Phase 1: single seed, both models, interim report.
 echo
+echo "[compare] phase 1: single seed ($FIRST_SEED)"
+PHASE1_OK=1
+for m in $MODELS; do run_one "$m" "$FIRST_SEED" || PHASE1_OK=0; done
+for m in $MODELS; do explain_one "$m" "$FIRST_SEED"; done
 REPORT_RC=0
-set -- $MODELS
-if [ $# -eq 2 ]; then
-    "$PYTHON" scripts/compare_report.py "$OUT" --baseline "$1" --ours "$2" || REPORT_RC=$?
+if [ "$PHASE1_OK" -eq 1 ]; then
+    if [ -n "$REST_SEEDS" ]; then
+        report "_seed-$FIRST_SEED" || REPORT_RC=$?
+        echo "[compare] interim single-seed report: $OUT/comparison_seed-$FIRST_SEED.md"
+    else
+        report "" || REPORT_RC=$?
+    fi
+fi
+if [ "$PHASE1_OK" -ne 1 ] || [ "$REPORT_RC" -ne 0 ]; then
+    echo "[compare] stopping after phase 1 (run failure or no-backprop audit failure)"
+    for f in "${FAILED[@]}"; do echo "  - $f"; done
+    exit 1
+fi
+
+# Phase 2: remaining seeds, then the final report over all seeds.
+if [ -n "$REST_SEEDS" ]; then
+    echo
+    echo "[compare] phase 2: seeds $REST_SEEDS"
+    for s in $REST_SEEDS; do
+        for m in $MODELS; do run_one "$m" "$s"; done
+        for m in $MODELS; do explain_one "$m" "$s"; done
+    done
+    report "" || REPORT_RC=$?
+    FINAL="$OUT/comparison.md"
 else
-    echo "[compare] compare_report.py needs exactly two models (got: $MODELS); skipping"
+    FINAL="$OUT/comparison.md"
 fi
 
 echo
-echo "[compare] done in $(( ($(date +%s) - STARTED) / 60 )) min: $((total - ${#FAILED[@]}))/$total runs succeeded"
-echo "[compare] report: $OUT/comparison.md"
+echo "[compare] done in $(( ($(date +%s) - STARTED) / 60 )) min: $((i - ${#FAILED[@]}))/$total runs succeeded"
+echo "[compare] report: $FINAL"
 if [ ${#FAILED[@]} -gt 0 ]; then
     echo "[compare] failed runs:"; for f in "${FAILED[@]}"; do echo "  - $f"; done
 fi

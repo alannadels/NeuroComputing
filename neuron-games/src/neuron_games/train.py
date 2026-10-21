@@ -22,6 +22,7 @@ from .eval import evaluate
 from .game import NeuronGame
 from .model import build_net
 from .potential.task import spike_count_predictions, task_loss
+from .progress import EpochProgress
 
 
 def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
@@ -32,7 +33,8 @@ def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
     raise ValueError(f"unknown optimizer {cfg.optimizer!r}")
 
 
-def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device) -> dict:
+def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device,
+                          bar: EpochProgress | None = None) -> dict:
     net.train()
     loss_fn = task_loss(cfg.task_loss)
     out: dict[str, list] = {"loss": [], "acc": [], "rates": []}
@@ -52,12 +54,14 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device) -> d
         out["loss"].append(float(loss.item()))
         out["acc"].append(float(
             (spike_count_predictions(rec.out_spk) == targets).float().mean().item()))
+        if bar is not None:
+            bar.update(out["loss"][-1], out["acc"][-1])
         out["rates"].append([float(s.detach().mean().item()) for s in rec.spk])
     return out
 
 
 def _train_one_epoch_game(game: NeuronGame, loader, optimizer, cfg: NGRunConfig,
-                          device, epoch: int) -> dict:
+                          device, epoch: int, bar: EpochProgress | None = None) -> dict:
     game.net.train()
     out: dict[str, list] = {"loss": [], "acc": [], "rates": [], "phi": [], "reward": [],
                             "components": [], "grad_norms": []}
@@ -72,6 +76,8 @@ def _train_one_epoch_game(game: NeuronGame, loader, optimizer, cfg: NGRunConfig,
 
         out["loss"].append(res.J)
         out["acc"].append(res.acc)
+        if bar is not None:
+            bar.update(res.J, res.acc)
         out["rates"].append(res.rates)
         out["phi"].append(res.phi)
         out["reward"].append(res.reward)
@@ -138,10 +144,15 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
 
     for epoch in range(cfg.epochs):
         t0 = time.perf_counter()
+        n_batches = len(loaders["train"])
+        if cfg.max_train_batches:
+            n_batches = min(n_batches, cfg.max_train_batches)
+        bar = EpochProgress(cfg.progress, epoch + 1, cfg.epochs, n_batches)
         if game is None:
-            ep = _train_one_epoch_bptt(net, loaders["train"], optimizer, cfg, device)
+            ep = _train_one_epoch_bptt(net, loaders["train"], optimizer, cfg, device, bar)
         else:
-            ep = _train_one_epoch_game(game, loaders["train"], optimizer, cfg, device, epoch)
+            ep = _train_one_epoch_game(game, loaders["train"], optimizer, cfg, device, epoch, bar)
+        bar.close()
         val = evaluate(net, loaders["val"], cfg, device)
         dt = time.perf_counter() - t0
 

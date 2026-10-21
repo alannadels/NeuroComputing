@@ -136,6 +136,7 @@ class NGRunConfig:
     epochs: int = 1
     batch_size: int = 128
     max_train_batches: int = 0            # >0: stop each epoch after this many batches (smoke runs)
+    progress: bool = False                # draw an in-place per-batch progress bar on stderr
 
     # --- Evaluation / reproducibility (same meaning as neuron_baseline.Config) ---
     val_size: int = 5000

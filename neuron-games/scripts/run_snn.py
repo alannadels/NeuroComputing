@@ -80,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--max-train-batches", type=int, default=None,
                    help="stop each epoch after this many batches (smoke runs)")
+    p.add_argument("--progress", action=argparse.BooleanOptionalAction, default=None,
+                   help="per-batch progress bar (default: on when stderr is a terminal)")
     p.add_argument("--run-dir", default=None)
     p.add_argument("--data-dir", default=str(ROOT / "data" / "raw"))
     p.add_argument("--ckpt", default=None, help="checkpoint for --mode eval")
@@ -116,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
 
     overrides = {"dataset": args.dataset, "device": args.device, "data_dir": args.data_dir,
                  **_parse_set(args.set)}
+    overrides["progress"] = (args.progress if args.progress is not None
+                             else (sys.stderr.isatty() or "NG_PROGRESS_FD" in __import__("os").environ))
     for key in ("epochs", "seed", "max_train_batches", "run_dir"):
         val = getattr(args, key)
         if val is not None:
