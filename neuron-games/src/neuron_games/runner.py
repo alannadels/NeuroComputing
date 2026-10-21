@@ -47,6 +47,11 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
     cfg.run_dir = str(run_dir)
 
     seed_everything(cfg.seed)
+    # neuron_baseline turns on cuDNN autotuning for its conv net. This network has
+    # no convolutions except the diversity term's 1-D smoothing, where autotuning
+    # only adds a one-time scratch allocation (~0.5-1 GB) that would distort the
+    # peak-memory measurements. Off for every model.
+    torch.backends.cudnn.benchmark = False
     cfg.fingerprint = fingerprint()
     device = resolve_device(cfg.device)
 
@@ -181,7 +186,8 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
               f"{test_timing['images_per_s']:.0f} images/s)")
         d = test_metrics["detailed"]
         print(f"[done] test: balanced_acc={d['balanced_accuracy']:.4f} macro_f1={d['macro_f1']:.4f} "
-              f"ece={d['calibration']['ece']:.4f} brier={d['calibration']['brier']:.4f} "
+              f"ece(raw,temp-scaled)=({d['calibration']['ece']:.4f},"
+              f"{d['calibration_temperature_scaled']['ece']:.4f}) "
               f"decision_step(mean)={d['temporal']['decision_step']['all']['mean']:.2f}/{cfg.num_steps}")
         print("[done] steps sweep: " + "  ".join(
             f"T={s['num_steps']}: acc={s['accuracy']:.4f} {s['inference_ms_per_image']:.3f}ms/img"

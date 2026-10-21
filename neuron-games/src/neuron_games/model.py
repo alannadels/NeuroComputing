@@ -92,12 +92,13 @@ class SNNRecord:
     With `record_traces=True` the forward pass also fills the eligibility
     factors E(.) (proposal §7.1, eq. 19), in factorized form:
 
-    - inp[l]: [T, B, fan_in_l]   presynaptic input to layer l at step t
     - eps[l]: [T, B, fan_in_l]   eps_j[t] = alpha * eps_j[t-1] + inp_j[t]
     - h[l]:   [T, B, N_l]        h_i[t] = fast_sigmoid_grad(u_i[t] - v_th)
 
     The synapse-local eligibility trace is e_ij[t] = h_i[t] * eps_j[t]. It is
     never materialized at [T, B, N_l, fan_in_l]; see learning_rule.py.
+    With `record_inputs=True`, inp[l] ([T, B, fan_in_l], the presynaptic input
+    to layer l) is recorded as well (tests only).
     """
     spk: list[torch.Tensor]
     mem: list[torch.Tensor]
@@ -134,23 +135,31 @@ class FCSNN(nn.Module):
         return [layer.fc.weight for layer in self.layers]
 
     def forward(self, x_seq: torch.Tensor, record_traces: bool = False,
-                masks: list[torch.Tensor | None] | None = None) -> SNNRecord:
+                masks: list[torch.Tensor | None] | None = None,
+                record_inputs: bool = False) -> SNNRecord:
         """x_seq: [T, B, n_in]. State starts at zero on every call.
 
-        record_traces: also record inp / eps / h (see SNNRecord). Used by the
-            three-factor rule; costs O(T * B * fan_in) memory per layer.
+        record_traces: also record eps / h (see SNNRecord), written into
+            preallocated [T, ...] tensors. Used by the three-factor rule;
+            costs O(T * B * fan_in) memory per layer.
+        record_inputs: also record each layer's input (rec.inp). Only tests
+            need it; training does not, so it is off by default.
         masks: optional per-layer [N_l] multipliers applied to that layer's
             spikes (0 silences a neuron). Used by post-hoc attribution to
             remove neurons; None everywhere means the plain network.
         """
         T, B = x_seq.shape[:2]
-        states = [layer.init_state(B, x_seq.device, x_seq.dtype) for layer in self.layers]
+        dev, dt = x_seq.device, x_seq.dtype
+        states = [layer.init_state(B, dev, dt) for layer in self.layers]
         spk: list[list[torch.Tensor]] = [[] for _ in self.layers]
         mem: list[list[torch.Tensor]] = [[] for _ in self.layers]
-        inp_rec: list[list[torch.Tensor]] = [[] for _ in self.layers]
-        eps_rec: list[list[torch.Tensor]] = [[] for _ in self.layers]
-        h_rec: list[list[torch.Tensor]] = [[] for _ in self.layers]
-        eps_state: list[torch.Tensor | None] = [None for _ in self.layers]
+        fan_in = [layer.fc.in_features for layer in self.layers]
+        n_out = [layer.fc.out_features for layer in self.layers]
+        if record_traces:
+            eps_buf = [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in]
+            h_buf = [torch.empty(T, B, n, device=dev, dtype=dt) for n in n_out]
+        if record_inputs:
+            inp_buf = [None] + [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in[1:]]
 
         for t in range(T):
             inp = x_seq[t]
@@ -159,13 +168,16 @@ class FCSNN(nn.Module):
                 s, u = layer.step(inp, u, s)
                 if masks is not None and masks[l] is not None:
                     s = s * masks[l]
-                if record_traces:
-                    e = inp if eps_state[l] is None else layer.alpha * eps_state[l] + inp
-                    eps_state[l] = e
-                    inp_rec[l].append(inp)
-                    eps_rec[l].append(e)
-                    h_rec[l].append(fast_sigmoid_grad(u - layer.threshold,
-                                                      layer.surrogate_slope))
+                if record_traces:            # traces are constants for the learning rule
+                    x_d = inp.detach()
+                    if t == 0:
+                        eps_buf[l][0].copy_(x_d)
+                    else:
+                        torch.add(x_d, eps_buf[l][t - 1], alpha=layer.alpha, out=eps_buf[l][t])
+                    h_buf[l][t] = fast_sigmoid_grad(u.detach() - layer.threshold,
+                                                    layer.surrogate_slope)
+                if record_inputs and l > 0:
+                    inp_buf[l][t] = inp.detach()
                 states[l] = (u, s)
                 spk[l].append(s)
                 mem[l].append(u)
@@ -174,9 +186,9 @@ class FCSNN(nn.Module):
         rec = SNNRecord(spk=[torch.stack(r) for r in spk],
                         mem=[torch.stack(r) for r in mem])
         if record_traces:
-            rec.inp = [torch.stack(r) for r in inp_rec]
-            rec.eps = [torch.stack(r) for r in eps_rec]
-            rec.h = [torch.stack(r) for r in h_rec]
+            rec.eps, rec.h = eps_buf, h_buf
+        if record_inputs:
+            rec.inp = [x_seq] + inp_buf[1:]      # layer 0's input is x_seq itself (no copy)
         return rec
 
 

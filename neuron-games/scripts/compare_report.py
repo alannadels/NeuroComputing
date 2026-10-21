@@ -119,6 +119,12 @@ def summarize(runs: list[dict]) -> dict:
         "brier": _ms(col(lambda r: det(r, "calibration", "brier"))),
         "nll": _ms(col(lambda r: det(r, "calibration", "nll"))),
         "mean_confidence": _ms(col(lambda r: det(r, "calibration", "mean_confidence"))),
+        "ts_temperature": _ms(col(lambda r: det(r, "calibration_temperature_scaled", "temperature"))),
+        "ts_ece": _ms(col(lambda r: det(r, "calibration_temperature_scaled", "ece"))),
+        "ts_brier": _ms(col(lambda r: det(r, "calibration_temperature_scaled", "brier"))),
+        "ts_nll": _ms(col(lambda r: det(r, "calibration_temperature_scaled", "nll"))),
+        "ts_mean_confidence": _ms(col(lambda r: det(r, "calibration_temperature_scaled",
+                                                    "mean_confidence"))),
         "decision_step_mean": _ms(col(lambda r: det(r, "temporal", "decision_step", "all", "mean"))),
         "decision_step_median": _ms(col(lambda r: det(r, "temporal", "decision_step", "all", "median"))),
         "decision_step_correct": _ms(col(lambda r: det(r, "temporal", "decision_step", "correct", "mean"))),
@@ -342,12 +348,20 @@ def main(argv=None) -> int:
         ("best epoch", "best_epoch", 1, 1.0),
     ])
     table("Calibration", [
-        ("expected calibration error (15 bins)", "ece", 4, 1.0),
-        ("Brier score", "brier", 4, 1.0),
-        ("negative log-likelihood", "nll", 4, 1.0),
-        ("mean confidence in the prediction", "mean_confidence", 4, 1.0),
-    ], note="Probabilities follow each model's training loss (ce_rate: mean over steps of "
-            "softmax(spikes[t])); confidence = probability of the predicted class.")
+        ("ECE, temperature-scaled (15 bins)", "ts_ece", 4, 1.0),
+        ("Brier score, temperature-scaled", "ts_brier", 4, 1.0),
+        ("NLL, temperature-scaled", "ts_nll", 4, 1.0),
+        ("mean confidence, temperature-scaled", "ts_mean_confidence", 4, 1.0),
+        ("fitted temperature (on validation)", "ts_temperature", 3, 1.0),
+        ("ECE, raw loss probabilities", "ece", 4, 1.0),
+        ("Brier score, raw", "brier", 4, 1.0),
+        ("NLL, raw", "nll", 4, 1.0),
+        ("mean confidence, raw", "mean_confidence", 4, 1.0),
+    ], note="Temperature-scaled: softmax(output spike counts / tau), tau fit on the validation "
+            "split (Guo et al. 2017); compare models on these. Raw: the probabilities the training "
+            "loss defines (ce_rate: mean over steps of softmax(spikes[t])), which squash toward "
+            "1/10, so raw ECE mostly reflects that definition. Confidence = probability of the "
+            "predicted class.")
     table("Decision timing (test)", [
         ("decision step, mean (all)", "decision_step_mean", 2, 1.0),
         ("decision step, median (all)", "decision_step_median", 1, 1.0),

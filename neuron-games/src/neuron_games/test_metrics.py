@@ -8,7 +8,12 @@
    - per-class accuracy (recall), precision, F1; balanced accuracy; macro P/R/F1;
      confusion matrix [true, predicted]
    - calibration: expected calibration error (15 equal-width bins), Brier score,
-     negative log-likelihood
+     negative log-likelihood, twice: (a) raw, with the probabilities the training
+     loss defines; (b) temperature-scaled (Guo et al. 2017): probabilities
+     softmax(counts / tau) from the output spike counts, with tau fit on the
+     validation split by minimizing NLL. (a) is dominated by how the loss turns
+     spikes into probabilities (ce_rate squashes them toward 1/C); (b) measures
+     how well each model's spike counts rank and separate the classes.
    - accuracy over time: accuracy using the spikes of steps 1..t, for every t
    - decision step: per example, the earliest step after which the prediction
      never changes again (1 = decided from the first step)
@@ -28,6 +33,7 @@ import dataclasses
 
 import torch
 
+from .eval import evaluate
 from .timing import timed_inference
 
 ECE_BINS = 15
@@ -88,6 +94,22 @@ def calibration_metrics(probs: torch.Tensor, pred: torch.Tensor, target: torch.T
     }
 
 
+TEMPERATURES = torch.logspace(-2, 2, 401, dtype=torch.float64)   # 0.01 .. 100
+
+
+def fit_temperature(counts: torch.Tensor, target: torch.Tensor) -> float:
+    """tau minimizing NLL of softmax(counts / tau) on held-out data (grid search,
+    no autograd). counts: [N, C] output spike counts."""
+    z = counts.double()
+    best_tau, best_nll = 1.0, float("inf")
+    for tau in TEMPERATURES:
+        logp = torch.log_softmax(z / tau, dim=1)
+        nll = float(-logp.gather(1, target.unsqueeze(1)).mean())
+        if nll < best_nll:
+            best_tau, best_nll = float(tau), nll
+    return best_tau
+
+
 def temporal_metrics(counts_t: torch.Tensor, target: torch.Tensor) -> dict:
     """counts_t: [N, T, C] cumulative output spike counts."""
     preds_t = counts_t.argmax(dim=-1)                          # [N, T]
@@ -118,15 +140,23 @@ def temporal_metrics(counts_t: torch.Tensor, target: torch.Tensor) -> dict:
     }
 
 
-def detailed_metrics(collected: dict, n_classes: int) -> dict:
+def detailed_metrics(collected: dict, n_classes: int, val_collected: dict | None = None) -> dict:
     counts_t, probs, target = collected["counts_t"].long(), collected["probs"], collected["targets"].long()
-    pred = counts_t[:, -1, :].argmax(dim=-1)
-    return {
+    counts = counts_t[:, -1, :]
+    pred = counts.argmax(dim=-1)
+    out = {
         "accuracy": float((pred == target).double().mean()),
         **classification_metrics(pred, target, n_classes),
         "calibration": calibration_metrics(probs, pred, target),
         "temporal": temporal_metrics(counts_t, target),
     }
+    if val_collected is not None:
+        tau = fit_temperature(val_collected["counts_t"][:, -1, :].long(),
+                              val_collected["targets"].long())
+        scaled = torch.softmax(counts.double() / tau, dim=1)
+        out["calibration_temperature_scaled"] = {"temperature": tau, "fit_on": "validation",
+                                                 **calibration_metrics(scaled, pred, target)}
+    return out
 
 
 def steps_sweep(net, loaders, cfg, device: torch.device, steps: list[int]) -> list[dict]:
@@ -153,7 +183,9 @@ def full_test_evaluation(net, loaders, cfg, device: torch.device, meter=None) ->
                                     warmup_loader=loaders["val"], collect=True)
         energy = None
     collected = m.pop("_collected")
-    detailed = detailed_metrics(collected, cfg.n_out)
+    # Validation pass (untimed) to fit the calibration temperature.
+    val_collected = evaluate(net, loaders["val"], cfg, device, collect=True)["_collected"]
+    detailed = detailed_metrics(collected, cfg.n_out, val_collected)
     steps = sorted({s for s in cfg.eval_steps if 0 < s <= cfg.num_steps} | {cfg.num_steps})
     sweep = steps_sweep(net, loaders, cfg, device, steps)
     return {"metrics": m, "timing": timing, "energy": energy, "detailed": detailed, "sweep": sweep}

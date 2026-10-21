@@ -43,7 +43,7 @@ def _x(T=15, B=5, n_in=12, p=0.4, seed=1) -> torch.Tensor:
 def test_eps_recursion_hand_worked() -> None:
     net = FCSNN(n_in=2, n_hidden=1, n_out=1, alpha=0.5)
     x = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]).unsqueeze(1)   # [T=3, B=1, 2]
-    rec = net(x, record_traces=True)
+    rec = net(x, record_traces=True, record_inputs=True)
     expected = torch.tensor([[1.0, 0.0], [0.5, 1.0], [1.25, 1.5]]).unsqueeze(1)
     torch.testing.assert_close(rec.eps[0], expected)
     torch.testing.assert_close(rec.inp[0], x)
@@ -76,7 +76,7 @@ def test_eligibility_is_exact_local_derivative(layer: int) -> None:
     not limited by float32 summation order."""
     net, x = _net().double(), _x().double()
     with torch.no_grad():
-        rec = net(x, record_traces=True)
+        rec = net(x, record_traces=True, record_inputs=True)
     g = torch.Generator().manual_seed(3)
     a = torch.randn(rec.spk[layer].shape, generator=g, dtype=torch.float64)
     c = torch.randn(rec.mem[layer].shape, generator=g, dtype=torch.float64)

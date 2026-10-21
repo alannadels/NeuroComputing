@@ -104,3 +104,12 @@ def test_full_test_evaluation_shapes() -> None:
     assert len(d["confusion_matrix"]) == 10
     assert [s["num_steps"] for s in ev["sweep"]] == [2, 4, 6]
     assert ev["timing"]["n_images"] == 24
+
+
+def test_fit_temperature_recovers_scale() -> None:
+    from neuron_games.test_metrics import fit_temperature
+    torch.manual_seed(0)
+    logits = torch.randn(4000, 10) * 3.0
+    target = torch.distributions.Categorical(logits=logits).sample()
+    # data generated with softmax(logits); give the fitter logits scaled by 4 -> tau ~ 4
+    assert fit_temperature(logits * 4.0, target) == pytest.approx(4.0, rel=0.1)
