@@ -10,11 +10,13 @@ scripts/run_comparison.sh) and, when present, explain.json. Writes:
     <dir>/comparison.json   the same numbers, machine-readable
     <dir>/val_acc_vs_epoch.png, <dir>/val_acc_vs_time.png
 
-Time-to-accuracy uses the cumulative per-epoch wall time (training + that
-epoch's validation pass), so both models are charged the same way. Energy to
-reach an accuracy is estimated as train_energy * (time to reach / total train
-time), i.e. assuming constant GPU power within a run; it is labelled as an
-estimate wherever it appears.
+Timing is reported separately for training, validation and test inference
+(results.json wall_time_s / test_inference). Time-to-accuracy counts
+training time only (cumulative epoch_train_time_s): validation is measurement
+overhead, charged to neither model. Energy to reach an accuracy is an
+estimate: the train energy window (which also covers validation and
+checkpoint I/O) times the fraction of that window elapsed by the end of the
+epoch that reached it, i.e. assuming constant GPU power within a run.
 """
 from __future__ import annotations
 
@@ -47,9 +49,14 @@ def _cum(xs):
     return out
 
 
+def _train_times(history):
+    """Per-epoch training-only seconds (older runs: train + val combined)."""
+    return history.get("epoch_train_time_s") or history.get("epoch_time_s", [])
+
+
 def _time_to(history, target):
-    """(epoch, cumulative seconds) when val acc first reaches target, else (None, None)."""
-    for e, (t, a) in enumerate(zip(_cum(history.get("epoch_time_s", [])),
+    """(epoch, cumulative training seconds) when val acc first reaches target, else (None, None)."""
+    for e, (t, a) in enumerate(zip(_cum(_train_times(history)),
                                    history.get("epoch_val_acc", [])), start=1):
         if a >= target:
             return e, t
@@ -89,7 +96,15 @@ def summarize(runs: list[dict]) -> dict:
         "final_val_acc": _ms(col(lambda r: r["history"]["epoch_val_acc"][-1])),
         "best_epoch": _ms(col(lambda r: r["meta"].get("best_epoch"))),
         "train_wall_s": _ms(col(lambda r: r["wall_time_s"]["train"])),
-        "sec_per_epoch": _ms(col(lambda r: r["wall_time_s"]["train"] / max(n_epochs(r), 1))),
+        "train_s_per_epoch": _ms(col(lambda r: sum(_train_times(r["history"])) / max(n_epochs(r), 1))),
+        "val_s_per_epoch": _ms(col(lambda r: (sum(r["history"]["epoch_val_time_s"]) / max(n_epochs(r), 1))
+                                   if "epoch_val_time_s" in r["history"] else None)),
+        "train_plus_val_s_per_epoch": _ms(col(lambda r: sum(r["history"]["epoch_time_s"])
+                                              / max(n_epochs(r), 1))),
+        "test_s": _ms(col(lambda r: (r.get("test_inference") or {}).get("wall_s")
+                          or r["wall_time_s"].get("test") or r["wall_time_s"].get("inference"))),
+        "test_ms_per_image": _ms(col(lambda r: (r.get("test_inference") or {}).get("ms_per_image"))),
+        "test_images_per_s": _ms(col(lambda r: (r.get("test_inference") or {}).get("images_per_s"))),
         "train_energy_j": _ms(col(train_energy)),
         "energy_per_epoch_j": _ms(col(lambda r: (train_energy(r) / max(n_epochs(r), 1))
                                       if train_energy(r) is not None else None)),
@@ -99,7 +114,7 @@ def summarize(runs: list[dict]) -> dict:
         "test_output_rate": _ms(col(lambda r: r["test"]["firing_rate"][-1])),
         "autograd_calls_in_training": col(lambda r: r["meta"].get("autograd_calls_in_training")),
         "val_curves": col(lambda r: r["history"]["epoch_val_acc"]),
-        "time_curves": col(lambda r: _cum(r["history"]["epoch_time_s"])),
+        "time_curves": col(lambda r: _cum(_train_times(r["history"]))),
         "test_acc_by_seed": {r["seed"]: r["res"]["test"]["accuracy"] for r in runs},
     }
     faith = [r["explain"]["faithfulness"] for r in runs if r["explain"]]
@@ -128,8 +143,8 @@ def reach(runs: list[dict], target: float) -> dict:
             continue
         total_t = r["res"]["wall_time_s"]["train"]
         energy = ((r["res"].get("energy") or {}).get("train") or {}).get("energy_j")
-        cum = _cum(h["epoch_time_s"])
-        frac = t / cum[-1] if cum and cum[-1] > 0 else None
+        cum = _cum(h["epoch_time_s"])           # train + val, the span the energy window covers
+        frac = cum[e - 1] / cum[-1] if cum and cum[-1] > 0 else None
         hits.append((e, t, energy * frac if (energy is not None and frac is not None) else None,
                      total_t))
     return {"target": target, "reached": f"{len(hits)}/{len(runs)}",
@@ -144,7 +159,7 @@ def _plot(root: Path, models: dict[str, list[dict]], summaries: dict[str, dict])
 
     written = []
     for kind, xlabel, fname in (("epoch", "epoch", "val_acc_vs_epoch.png"),
-                                ("time", "cumulative training time (s)", "val_acc_vs_time.png")):
+                                ("time", "cumulative training time, validation excluded (s)", "val_acc_vs_time.png")):
         fig, ax = plt.subplots(figsize=(7, 4.5))
         for name, s in summaries.items():
             curves = s["val_curves"]
@@ -222,10 +237,15 @@ def main(argv=None) -> int:
         ("best val accuracy", "best_val_acc", 4, 1.0, ""),
         ("final-epoch val accuracy", "final_val_acc", 4, 1.0, ""),
         ("best epoch", "best_epoch", 1, 1.0, ""),
-        ("train wall time (s)", "train_wall_s", 1, 1.0, ""),
-        ("seconds per epoch", "sec_per_epoch", 2, 1.0, ""),
-        ("train GPU energy (kJ)", "train_energy_j", 2, 1e-3, ""),
-        ("GPU energy per epoch (J)", "energy_per_epoch_j", 1, 1.0, ""),
+        ("training time, total (s)", "train_wall_s", 1, 1.0, ""),
+        ("training time per epoch (s)", "train_s_per_epoch", 2, 1.0, ""),
+        ("validation time per epoch (s)", "val_s_per_epoch", 3, 1.0, ""),
+        ("train + val time per epoch (s)", "train_plus_val_s_per_epoch", 2, 1.0, ""),
+        ("test inference time (s, 10k images)", "test_s", 3, 1.0, ""),
+        ("test inference latency (ms / image)", "test_ms_per_image", 4, 1.0, ""),
+        ("test inference throughput (images / s)", "test_images_per_s", 0, 1.0, ""),
+        ("train-window GPU energy (kJ, incl. val)", "train_energy_j", 2, 1e-3, ""),
+        ("train-window GPU energy per epoch (J)", "energy_per_epoch_j", 1, 1.0, ""),
         ("inference GPU energy per image (mJ)", "inference_energy_per_image_j", 3, 1e3, ""),
         ("hidden firing rate (test)", "test_hidden_rate", 3, 1.0, ""),
         ("output firing rate (test)", "test_output_rate", 3, 1.0, ""),
@@ -238,9 +258,10 @@ def main(argv=None) -> int:
              f"**{_fmt(*gap[:2], digits=4, scale=100, suffix=' pt')}** over {gap[2]} seeds.\n")
 
     L.append("## Time and energy to reach a validation accuracy\n")
-    L.append("Energy is an estimate (train energy × fraction of training time). "
-             "`reached` counts seeds that got there within the run.\n")
-    L.append("| target val acc | model | reached | epochs | seconds | est. energy (kJ) |")
+    L.append("Seconds are training time only (validation excluded). Energy is an estimate "
+             "(train-window energy × fraction of the window elapsed). `reached` counts seeds "
+             "that got there within the run.\n")
+    L.append("| target val acc | model | reached | epochs | training seconds | est. energy (kJ) |")
     L.append("|---|---|---|---|---|---|")
     for i, t in enumerate(targets):
         for m in models:

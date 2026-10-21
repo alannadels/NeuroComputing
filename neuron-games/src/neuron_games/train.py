@@ -23,6 +23,7 @@ from .game import NeuronGame
 from .model import build_net
 from .potential.task import spike_count_predictions, task_loss
 from .progress import EpochProgress
+from .timing import synced_time
 
 
 def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
@@ -129,7 +130,10 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         "epoch_val_loss":       [],
         "epoch_val_acc":        [],
         "epoch_val_firing_rate": [],
-        "epoch_time_s":         [],
+        "epoch_train_time_s":   [],      # training batches only
+        "epoch_val_time_s":     [],      # validation pass only
+        "epoch_time_s":         [],      # train + val (checkpoint I/O excluded)
+        "epoch_ckpt_time_s":    [],      # saving last.pt / best.pt
     }
     if game is not None:
         history.update({
@@ -143,7 +147,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
     best_val_acc = -1.0
 
     for epoch in range(cfg.epochs):
-        t0 = time.perf_counter()
+        t0 = synced_time(device)
         n_batches = len(loaders["train"])
         if cfg.max_train_batches:
             n_batches = min(n_batches, cfg.max_train_batches)
@@ -153,8 +157,10 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         else:
             ep = _train_one_epoch_game(game, loaders["train"], optimizer, cfg, device, epoch, bar)
         bar.close()
+        t1 = synced_time(device)
         val = evaluate(net, loaders["val"], cfg, device)
-        dt = time.perf_counter() - t0
+        t2 = synced_time(device)
+        train_s, val_s = t1 - t0, t2 - t1
 
         nb = max(len(ep["loss"]), 1)
         rates = [sum(r[l] for r in ep["rates"]) / nb for l in range(len(net.layers))]
@@ -166,7 +172,9 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         history["epoch_val_loss"].append(val["loss"])
         history["epoch_val_acc"].append(val["accuracy"])
         history["epoch_val_firing_rate"].append(val["firing_rate"])
-        history["epoch_time_s"].append(dt)
+        history["epoch_train_time_s"].append(train_s)
+        history["epoch_val_time_s"].append(val_s)
+        history["epoch_time_s"].append(train_s + val_s)
 
         extra_log = ""
         if game is not None:
@@ -184,8 +192,9 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
               f"train_acc={history['epoch_train_acc'][-1]:.4f}{extra_log} "
               f"val_loss={val['loss']:.4f} val_acc={val['accuracy']:.4f} "
               f"rate(h,o)=({rates[0]:.3f},{rates[-1]:.3f}) "
-              f"time={dt:.1f}s")
+              f"time(train,val)=({train_s:.1f}s,{val_s:.2f}s)")
 
+        t3 = time.perf_counter()
         game_extra = game.state_dict() if game is not None else {}
         save_checkpoint(run_dir / "checkpoints" / "last.pt",
                         net, optimizer, cfg, epoch + 1, val["accuracy"], extra=game_extra)
@@ -194,6 +203,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
             save_checkpoint(run_dir / "checkpoints" / "best.pt",
                             net, optimizer, cfg, epoch + 1, val["accuracy"],
                             extra={"selection": "best_val_acc", **game_extra})
+        history["epoch_ckpt_time_s"].append(time.perf_counter() - t3)
 
     return {"history": history, "best_val_acc": best_val_acc,
             "net": net, "optimizer": optimizer}

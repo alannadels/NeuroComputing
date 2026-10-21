@@ -24,7 +24,9 @@ Usage (from neuron-games/):
 --dataset: mnist | fashion_mnist
 
 Prints one JSON line prefixed with RESULT: at the end (model, dataset,
-learning rule, test accuracy, wall time, autograd calls during training).
+learning rule, test accuracy, train / val / test time, autograd calls during
+training). --mode eval also writes <run_dir>/eval_<ckpt>.json with the test
+metrics and inference timing (wall time, ms per image, images per second).
 """
 from __future__ import annotations
 
@@ -92,7 +94,6 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     from neuron_games.data import loaders_for
-    from neuron_games.eval import evaluate
     from neuron_games.model import build_net
     from neuron_games.runner import resolve_device, run_training
     from neuron_games._baseline import seed_everything
@@ -100,19 +101,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "eval":
         if not args.ckpt:
             raise SystemExit("--mode eval needs --ckpt")
-        ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        from neuron_games.timing import timed_inference
+
+        ckpt_path = Path(args.ckpt)
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         cfg = NGRunConfig.from_dict({**ckpt["config"], "device": args.device,
                                      "data_dir": args.data_dir})
         seed_everything(cfg.seed)
         device = resolve_device(cfg.device)
         net = build_net(cfg).to(device)
         net.load_state_dict(ckpt["model_state"])
-        t0 = time.perf_counter()
-        m = evaluate(net, loaders_for(cfg)["test"], cfg, device)
-        result = {"mode": "eval", "ckpt": args.ckpt, "condition": cfg.condition,
-                  "dataset": cfg.dataset, "learning_rule": cfg.learning_rule,
+        loaders = loaders_for(cfg)
+        m, timing = timed_inference(net, loaders["test"], cfg, device, warmup_loader=loaders["val"])
+        result = {"mode": "eval", "ckpt": str(ckpt_path), "epoch": ckpt.get("epoch"),
+                  "condition": cfg.condition, "dataset": cfg.dataset,
+                  "learning_rule": cfg.learning_rule, "split": "test",
                   "test_accuracy": m["accuracy"], "test_loss": m["loss"], "n": m["n"],
-                  "firing_rate": m["firing_rate"], "wall_s": time.perf_counter() - t0}
+                  "firing_rate": m["firing_rate"], "inference": timing}
+        # Saved next to the run: <run_dir>/eval.json (checkpoint lives in <run_dir>/checkpoints/)
+        out_path = (ckpt_path.parent.parent if ckpt_path.parent.name == "checkpoints"
+                    else ckpt_path.parent) / f"eval_{ckpt_path.stem}.json"
+        out_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(f"[eval] test_accuracy={m['accuracy']:.4f} n={m['n']}  "
+              f"inference {timing['wall_s']:.2f}s, {timing['ms_per_image']:.3f} ms/image, "
+              f"{timing['images_per_s']:.0f} images/s  -> {out_path}")
         print("RESULT: " + json.dumps(result))
         return 0
 
@@ -140,7 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         "best_val_accuracy": res["best_val_accuracy"],
         "test_accuracy": res["test"]["accuracy"],
         "test_firing_rate": res["test"]["firing_rate"],
-        "train_wall_s": res["wall_time_s"]["train"],
+        "time_s": {k: res["wall_time_s"][k] for k in
+                   ("train", "val", "train_plus_val", "train_per_epoch", "val_per_epoch",
+                    "train_plus_val_per_epoch", "test")},
+        "test_ms_per_image": res["test_inference"]["ms_per_image"],
         "train_energy_j": (res["energy"]["train"] or {}).get("energy_j"),
         "run_dir": str(out["run_dir"]),
     }

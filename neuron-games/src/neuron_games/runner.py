@@ -14,10 +14,9 @@ import torch
 from ._baseline import EnergyMeter, fingerprint, save_training_plots, seed_everything
 from .config import NGRunConfig
 from .data import loaders_for
-from .encoding import encode
-from .eval import evaluate
 from .guard import BackpropInvoked, count_autograd_calls
 from .model import build_net
+from .timing import synced_time, timed_inference
 from .train import train
 
 
@@ -65,9 +64,9 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
               f"cumulative_energy={meter.has_cumulative} device='{meter.device_name}'")
 
     with meter.measure("train"), count_autograd_calls() as autograd_calls:
-        t0 = time.perf_counter()
+        t0 = synced_time(device)
         out = train(cfg, loaders, device, run_dir)
-        train_wall_s = time.perf_counter() - t0
+        train_window_s = synced_time(device) - t0
     train_energy = meter.result
     if cfg.learning_rule == "three_factor" and autograd_calls.calls != 0:
         raise BackpropInvoked(f"{autograd_calls.calls} autograd backward/grad calls during "
@@ -81,17 +80,27 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
     eval_net.load_state_dict(ckpt["model_state"])
     eval_net.eval()
 
-    with torch.no_grad():
-        for i, (data, _) in enumerate(loaders["val"]):
-            if i >= cfg.warmup_batches:
-                break
-            eval_net(encode(data.to(device), cfg.num_steps, cfg.encoding))
-
     with meter.measure("inference"):
-        t0 = time.perf_counter()
-        test_metrics = evaluate(eval_net, loaders["test"], cfg, device)
-        infer_wall_s = time.perf_counter() - t0
+        # warm-up batches come from the val split and are not timed
+        test_metrics, test_timing = timed_inference(eval_net, loaders["test"], cfg, device,
+                                                    warmup_loader=loaders["val"])
     infer_energy = meter.result
+    infer_wall_s = test_timing["wall_s"]
+
+    h = out["history"]
+    n_ep = max(len(h["epoch_train_time_s"]), 1)
+    train_s, val_s = sum(h["epoch_train_time_s"]), sum(h["epoch_val_time_s"])
+    wall_time = {
+        "train": train_s,                        # training batches only, all epochs
+        "val": val_s,                            # validation passes only, all epochs
+        "train_plus_val": train_s + val_s,
+        "train_per_epoch": train_s / n_ep,
+        "val_per_epoch": val_s / n_ep,
+        "train_plus_val_per_epoch": (train_s + val_s) / n_ep,
+        "checkpoint_io": sum(h["epoch_ckpt_time_s"]),
+        "training_window": train_window_s,       # everything inside train(): also setup + checkpoint I/O
+        "test": infer_wall_s,                    # final test pass on best.pt, after warm-up
+    }
     meter.shutdown()
 
     energy_per_image_j = None
@@ -115,15 +124,17 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
         "history": out["history"],
         "best_val_accuracy": out["best_val_acc"],
         "test": test_metrics,
-        "wall_time_s": {"train": train_wall_s, "inference": infer_wall_s},
+        "wall_time_s": wall_time,
+        "test_inference": test_timing,
         "energy": {
             "train": train_energy.to_dict() if train_energy else None,
             "inference": infer_energy.to_dict() if infer_energy else None,
             "inference_per_image_j": energy_per_image_j,
             "measurement_notes": (
                 "GPU-only NVML reading via neuron_baseline.energy; null when NVML is "
-                "unavailable (e.g. Apple Silicon / CPU). Validation eval is inside the "
-                "training window. Warm-up forward passes precede the inference window."
+                "unavailable (e.g. Apple Silicon / CPU). The train window covers the whole "
+                "training loop including per-epoch validation and checkpoint I/O; see "
+                "wall_time_s for the time split. Warm-up passes precede the inference window."
             ),
         },
     }
@@ -135,7 +146,10 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
         print()
         print(f"[done] test_accuracy={test_metrics['accuracy']:.4f} on n={test_metrics['n']} "
               f"(best epoch {ckpt['epoch']}, val {out['best_val_acc']:.4f})")
-        print(f"[done] wall: train={train_wall_s:.1f}s inference={infer_wall_s:.1f}s")
+        print(f"[done] time: train={train_s:.1f}s ({wall_time['train_per_epoch']:.2f}s/epoch) "
+              f"val={val_s:.1f}s ({wall_time['val_per_epoch']:.2f}s/epoch) "
+              f"test={infer_wall_s:.2f}s ({test_timing['ms_per_image']:.3f} ms/image, "
+              f"{test_timing['images_per_s']:.0f} images/s)")
         print(f"[done] energy: train={train_energy.energy_j}J inference={infer_energy.energy_j}J "
               f"per_image={energy_per_image_j}J")
         print(f"[done] artifacts under: {run_dir.resolve()}")

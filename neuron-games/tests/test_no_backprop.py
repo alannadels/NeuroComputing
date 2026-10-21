@@ -156,3 +156,12 @@ def test_autograd_inside_game_step_raises(monkeypatch) -> None:
     y = torch.ones(2, requires_grad=True)
     (y * 3).sum().backward()
     assert y.grad is not None
+
+
+def test_epoch_timing_split(tmp_path) -> None:
+    cfg = NGRunConfig.for_condition("three_factor", n_hidden=16, num_steps=6, epochs=2, device="cpu")
+    h = train(cfg, _synthetic_loaders(), torch.device("cpu"), tmp_path)["history"]
+    for key in ("epoch_train_time_s", "epoch_val_time_s", "epoch_time_s", "epoch_ckpt_time_s"):
+        assert len(h[key]) == 2 and all(x >= 0 for x in h[key])
+    for tr, va, comb in zip(h["epoch_train_time_s"], h["epoch_val_time_s"], h["epoch_time_s"]):
+        assert comb == pytest.approx(tr + va)
