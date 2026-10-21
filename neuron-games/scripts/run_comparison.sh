@@ -157,14 +157,9 @@ run_one() {   # model seed
     echo "[compare] ok: $m/seed-$s in $(( $(date +%s) - t0 ))s"
 }
 
-explain_one() {   # model seed: only runs that logged credit (no-backprop runs)
+explain_one() {   # model seed: every model (credit is logged for all of them)
     local run_dir="$OUT/$1/seed-$2"
     [ "$SKIP_EXPLAIN" -eq 0 ] && [ -f "$run_dir/results.json" ] || return 0
-    "$PYTHON" - "$run_dir/results.json" <<'PY' || return 0
-import json, sys
-meta = json.load(open(sys.argv[1]))["meta"]
-sys.exit(0 if meta.get("potential", {}).get("credit", "none") != "none" else 1)
-PY
     echo "[explain] $run_dir"
     PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m neuron_games explain \
         --run "$run_dir" --device "$DEVICE" > "$run_dir/explain.log" 2>&1 \

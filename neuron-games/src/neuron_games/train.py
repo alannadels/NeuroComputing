@@ -7,23 +7,38 @@
 
 Structure mirrors neuron_baseline.train: val eval after every epoch, `best.pt`
 on val accuracy, `last.pt` always.
+
+Every metric is logged for every learning rule (no model-specific metrics):
+- per batch: loss, accuracy, firing rates, the model's own potential Phi and
+  reward r = Phi_n - Phi_{n-1} (for BPTT the objective is J alone, so Phi = -J),
+  ||gradient|| and ||applied update|| per layer, and Eligibility-Shapley credit
+  phi_i = <G_i, dW_i^(n-1)> with G the negative gradient of the model's own
+  objective (for BPTT: the backprop gradient it already computed; for the
+  three-factor rule: its three-factor estimate);
+- per epoch: a reference-Phi pass that scores every model with the same fixed
+  potential spec (the ng_full terms) on `diag_batches` validation batches,
+  measured only, never trained on; timed separately (epoch_diag_time_s);
+- per epoch: training and validation time and peak GPU memory, separately.
 """
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 import torch
 
-from .config import NGRunConfig
+from .config import CONDITION_PRESETS, NGRunConfig
 from .encoding import encode
 from .eval import evaluate
-from .game import NeuronGame
+from .game import NeuronGame, credit_metric
 from .model import build_net
+from .potential.base import TermContext
+from .potential.potential import active_terms, phi_value
 from .potential.task import spike_count_predictions, task_loss
 from .progress import EpochProgress
-from .timing import synced_time
+from .timing import peak_memory_mib, reset_peak_memory, synced_time
 
 
 def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
@@ -34,11 +49,46 @@ def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
     raise ValueError(f"unknown optimizer {cfg.optimizer!r}")
 
 
-def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device,
+def credit_layers_of(cfg: NGRunConfig, n_layers: int) -> list[int]:
+    return list(range(n_layers - 1)) if cfg.credit_layers == "hidden" else list(range(n_layers))
+
+
+class _EpochLog:
+    """Per-batch metrics shared by every learning rule."""
+
+    def __init__(self, n_layers: int):
+        self.n_layers = n_layers
+        self.d: dict[str, list] = {k: [] for k in ("loss", "acc", "rates", "phi", "reward",
+                                                   "components", "grad_norms", "update_norms")}
+        self.credit_sum: list[torch.Tensor | None] = [None] * n_layers
+        self.credit_n = 0
+
+    def add(self, *, loss, acc, rates, phi, reward, components, grad_norms, update_norms,
+            credit_phi) -> None:
+        for k, v in (("loss", loss), ("acc", acc), ("rates", rates), ("phi", phi),
+                     ("reward", reward), ("components", components),
+                     ("grad_norms", grad_norms), ("update_norms", update_norms)):
+            self.d[k].append(v)
+        if any(c is not None for c in credit_phi):
+            self.credit_n += 1
+            for l, c in enumerate(credit_phi):
+                if c is not None:
+                    self.credit_sum[l] = c.clone() if self.credit_sum[l] is None else self.credit_sum[l] + c
+
+    def result(self) -> dict:
+        out = dict(self.d)
+        out["credit_mean"] = [None if c is None else (c / self.credit_n).cpu().tolist()
+                              for c in self.credit_sum]
+        return out
+
+
+def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, state: dict,
                           bar: EpochProgress | None = None) -> dict:
     net.train()
     loss_fn = task_loss(cfg.task_loss)
-    out: dict[str, list] = {"loss": [], "acc": [], "rates": []}
+    params = [layer.fc.weight for layer in net.layers]
+    layers = credit_layers_of(cfg, len(params))
+    log = _EpochLog(len(params))
     for i, (data, targets) in enumerate(loader):
         if cfg.max_train_batches and i >= cfg.max_train_batches:
             break
@@ -50,48 +100,79 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device,
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        with torch.no_grad():
+            grads = [p.grad.detach() for p in params]
+            credit_phi = credit_metric([-g for g in grads], state["prev_delta_w"], layers)
+            before = [p.detach().clone() for p in params]
         optimizer.step()
+        with torch.no_grad():
+            state["prev_delta_w"] = [p.detach() - b for p, b in zip(params, before)]
 
-        out["loss"].append(float(loss.item()))
-        out["acc"].append(float(
-            (spike_count_predictions(rec.out_spk) == targets).float().mean().item()))
+        J = float(loss.item())
+        phi = -J                                   # BPTT's potential is the task term alone
+        reward = None if state["prev_phi"] is None else phi - state["prev_phi"]
+        state["prev_phi"] = phi
+        acc = float((spike_count_predictions(rec.out_spk) == targets).float().mean().item())
+        log.add(loss=J, acc=acc, rates=[float(s.detach().mean().item()) for s in rec.spk],
+                phi=phi, reward=reward, components={"J": J},
+                grad_norms=[float(g.norm()) for g in grads],
+                update_norms=[float(d.norm()) for d in state["prev_delta_w"]],
+                credit_phi=credit_phi)
         if bar is not None:
-            bar.update(out["loss"][-1], out["acc"][-1])
-        out["rates"].append([float(s.detach().mean().item()) for s in rec.spk])
-    return out
+            bar.update(J, acc)
+    return log.result()
 
 
 def _train_one_epoch_game(game: NeuronGame, loader, optimizer, cfg: NGRunConfig,
                           device, epoch: int, bar: EpochProgress | None = None) -> dict:
     game.net.train()
-    out: dict[str, list] = {"loss": [], "acc": [], "rates": [], "phi": [], "reward": [],
-                            "components": [], "grad_norms": []}
-    credit_sum: list[torch.Tensor | None] = [None] * len(game.net.layers)
-    credit_n = 0
+    log = _EpochLog(len(game.net.layers))
     for i, (data, targets) in enumerate(loader):
         if cfg.max_train_batches and i >= cfg.max_train_batches:
             break
         data = data.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         res = game.step(encode(data, cfg.num_steps, cfg.encoding), targets, optimizer, epoch)
-
-        out["loss"].append(res.J)
-        out["acc"].append(res.acc)
+        log.add(loss=res.J, acc=res.acc, rates=res.rates, phi=res.phi, reward=res.reward,
+                components=res.components, grad_norms=res.grad_norms,
+                update_norms=res.update_norms, credit_phi=res.credit_phi)
         if bar is not None:
             bar.update(res.J, res.acc)
-        out["rates"].append(res.rates)
-        out["phi"].append(res.phi)
-        out["reward"].append(res.reward)
-        out["components"].append(res.components)
-        out["grad_norms"].append(res.grad_norms)
-        if any(p is not None for p in res.credit_phi):
-            credit_n += 1
-            for l, p in enumerate(res.credit_phi):
-                if p is not None:
-                    credit_sum[l] = p.clone() if credit_sum[l] is None else credit_sum[l] + p
-    out["credit_mean"] = [None if c is None else (c / credit_n).cpu().tolist()
-                          for c in credit_sum]
-    return out
+    return log.result()
+
+
+def reference_phi_cfg(cfg: NGRunConfig) -> NGRunConfig:
+    """The fixed potential spec every model is scored with: the ng_full terms
+    (diversity, metabolic, barrier) with this run's coefficients."""
+    p = CONDITION_PRESETS["ng_full"]
+    return dataclasses.replace(cfg, learning_rule="three_factor", optimizer="sgd", bias=False,
+                               credit="none", credit_modulates=False,
+                               diversity=p["diversity"], metabolic=p["metabolic"],
+                               barrier=p["barrier"])
+
+
+@torch.no_grad()
+def reference_phi(net, loader, cfg: NGRunConfig, device, epoch: int) -> dict:
+    """Phi under the reference spec on the first cfg.diag_batches batches of
+    `loader`. Values only (no update); identical code for every model."""
+    ref = reference_phi_cfg(cfg)
+    loss_fn = task_loss(ref.task_loss)
+    weights = [layer.fc.weight.detach() for layer in net.layers]
+    sums: dict[str, float] = {}
+    n = 0
+    for i, (data, targets) in enumerate(loader):
+        if i >= cfg.diag_batches:
+            break
+        rec = net(encode(data.to(device), ref.num_steps, ref.encoding), record_traces=True)
+        comps = {"J": float(loss_fn(rec.out_spk, targets.to(device)))}
+        ctx = TermContext(rec=rec, weights=weights, cfg=ref, epoch=epoch)
+        for name, _coef, fn in active_terms(ref):
+            comps[name] = float(fn(ctx).value)
+        for k, v in comps.items():
+            sums[k] = sums.get(k, 0.0) + v
+        n += 1
+    comps = {k: v / max(n, 1) for k, v in sums.items()}
+    return {"phi": phi_value(comps.get("J", 0.0), comps, ref), "components": comps, "batches": n}
 
 
 def _mean_dicts(ds: list[dict]) -> dict[str, float]:
@@ -119,6 +200,8 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
     net = build_net(cfg).to(device)
     optimizer = build_optimizer(net, cfg)
     game = NeuronGame(net, cfg, device) if cfg.learning_rule == "three_factor" else None
+    bp_state = {"prev_delta_w": [None] * len(net.layers), "prev_phi": None}
+    n_layers = len(net.layers)
 
     # Key names match neuron_baseline so its plotting code works unchanged.
     history: dict[str, list] = {
@@ -132,38 +215,55 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         "epoch_val_firing_rate": [],
         "epoch_train_time_s":   [],      # training batches only
         "epoch_val_time_s":     [],      # validation pass only
-        "epoch_time_s":         [],      # train + val (checkpoint I/O excluded)
+        "epoch_time_s":         [],      # train + val (checkpoint I/O and diagnostics excluded)
+        "epoch_diag_time_s":    [],      # reference-Phi pass
         "epoch_ckpt_time_s":    [],      # saving last.pt / best.pt
+        "epoch_train_peak_mem_mib": [],           # allocator peak during training batches
+        "epoch_train_peak_mem_increase_mib": [],  # ... minus what was allocated at epoch start
+        "epoch_val_peak_mem_mib": [],
+        "epoch_val_peak_mem_increase_mib": [],
+        "phi_per_batch":        [],      # the model's own potential per window
+        "reward_per_batch":     [],      # r^(n) = Phi_n - Phi_{n-1}
+        "epoch_phi":            [],
+        "epoch_components":     [],      # mean of the model's own Phi terms
+        "epoch_grad_norm":      [],      # [epoch][layer] mean ||gradient||
+        "epoch_update_norm":    [],      # [epoch][layer] mean ||W_after - W_before||
+        "epoch_credit_per_neuron": [],   # [epoch][layer] -> list[N_l] or None
+        "epoch_phi_ref":        [],      # Phi under the shared reference spec
+        "epoch_phi_ref_components": [],
     }
-    if game is not None:
-        history.update({
-            "phi_per_batch":        [],      # Phi(x^(n)) per window
-            "reward_per_batch":     [],      # r^(n) = Phi_n - Phi_{n-1}
-            "epoch_phi":            [],
-            "epoch_components":     [],      # mean J, V, E_met, E_bar, R (+ term info)
-            "epoch_grad_norm":      [],      # [epoch][layer]
-            "epoch_credit_per_neuron": [],   # [epoch][layer] -> list[N_l] or None
-        })
     best_val_acc = -1.0
 
+    def _mean_layers(rows):
+        return [sum(r[l] for r in rows) / max(len(rows), 1) for l in range(n_layers)]
+
     for epoch in range(cfg.epochs):
+        mem0 = reset_peak_memory(device)
         t0 = synced_time(device)
         n_batches = len(loaders["train"])
         if cfg.max_train_batches:
             n_batches = min(n_batches, cfg.max_train_batches)
         bar = EpochProgress(cfg.progress, epoch + 1, cfg.epochs, n_batches)
         if game is None:
-            ep = _train_one_epoch_bptt(net, loaders["train"], optimizer, cfg, device, bar)
+            ep = _train_one_epoch_bptt(net, loaders["train"], optimizer, cfg, device, bp_state, bar)
         else:
             ep = _train_one_epoch_game(game, loaders["train"], optimizer, cfg, device, epoch, bar)
         bar.close()
         t1 = synced_time(device)
+        train_mem = peak_memory_mib(device, mem0)
+
+        mem1 = reset_peak_memory(device)
+        tv = synced_time(device)
         val = evaluate(net, loaders["val"], cfg, device)
         t2 = synced_time(device)
-        train_s, val_s = t1 - t0, t2 - t1
+        val_mem = peak_memory_mib(device, mem1)
+        train_s, val_s = t1 - t0, t2 - tv
+
+        ref = reference_phi(net, loaders["val"], cfg, device, epoch)
+        diag_s = synced_time(device) - t2
 
         nb = max(len(ep["loss"]), 1)
-        rates = [sum(r[l] for r in ep["rates"]) / nb for l in range(len(net.layers))]
+        rates = _mean_layers(ep["rates"])
         history["train_loss_per_batch"].extend(ep["loss"])
         history["train_acc_per_batch"].extend(ep["acc"])
         history["epoch_train_loss"].append(sum(ep["loss"]) / nb)
@@ -175,24 +275,30 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         history["epoch_train_time_s"].append(train_s)
         history["epoch_val_time_s"].append(val_s)
         history["epoch_time_s"].append(train_s + val_s)
+        history["epoch_diag_time_s"].append(diag_s)
+        history["epoch_train_peak_mem_mib"].append(train_mem["allocated"])
+        history["epoch_train_peak_mem_increase_mib"].append(train_mem["increase"])
+        history["epoch_val_peak_mem_mib"].append(val_mem["allocated"])
+        history["epoch_val_peak_mem_increase_mib"].append(val_mem["increase"])
+        history["phi_per_batch"].extend(ep["phi"])
+        history["reward_per_batch"].extend(ep["reward"])
+        history["epoch_phi"].append(sum(ep["phi"]) / nb)
+        history["epoch_components"].append(_mean_dicts(ep["components"]))
+        history["epoch_grad_norm"].append(_mean_layers(ep["grad_norms"]))
+        history["epoch_update_norm"].append(_mean_layers(ep["update_norms"]))
+        history["epoch_credit_per_neuron"].append(ep["credit_mean"])
+        history["epoch_phi_ref"].append(ref["phi"])
+        history["epoch_phi_ref_components"].append(ref["components"])
 
-        extra_log = ""
-        if game is not None:
-            history["phi_per_batch"].extend(ep["phi"])
-            history["reward_per_batch"].extend(ep["reward"])
-            history["epoch_phi"].append(sum(ep["phi"]) / nb)
-            history["epoch_components"].append(_mean_dicts(ep["components"]))
-            history["epoch_grad_norm"].append(
-                [sum(g[l] for g in ep["grad_norms"]) / nb for l in range(len(net.layers))])
-            history["epoch_credit_per_neuron"].append(ep["credit_mean"])
-            extra_log = f" phi={history['epoch_phi'][-1]:.4f}"
-
+        mem_log = ""
+        if train_mem["allocated"] is not None:
+            mem_log = f" mem(train,val)=({train_mem['allocated']:.0f},{val_mem['allocated']:.0f})MiB"
         print(f"[epoch {epoch+1}/{cfg.epochs}] "
               f"train_loss={history['epoch_train_loss'][-1]:.4f} "
-              f"train_acc={history['epoch_train_acc'][-1]:.4f}{extra_log} "
+              f"train_acc={history['epoch_train_acc'][-1]:.4f} "
               f"val_loss={val['loss']:.4f} val_acc={val['accuracy']:.4f} "
-              f"rate(h,o)=({rates[0]:.3f},{rates[-1]:.3f}) "
-              f"time(train,val)=({train_s:.1f}s,{val_s:.2f}s)")
+              f"phi_ref={ref['phi']:.4f} rate(h,o)=({rates[0]:.3f},{rates[-1]:.3f}) "
+              f"time(train,val)=({train_s:.1f}s,{val_s:.2f}s){mem_log}")
 
         t3 = time.perf_counter()
         game_extra = game.state_dict() if game is not None else {}

@@ -5,7 +5,8 @@ OWNER: William.
 Inputs available from the core:
 - results.json -> history["epoch_credit_per_neuron"][epoch][layer]: mean phi_i
   over that epoch's windows (list[N_l]) or None for uncredited layers.
-  Filled whenever cfg.credit != "none" (both modulating and post-hoc runs).
+  Logged for every run and every learning rule (credit is a metric; it only
+  feeds back into training when cfg.credit_modulates is set).
 - FCSNN.forward(x, masks=[m_0, ..., m_out]): m_l is [N_l]; 0 silences a neuron.
 """
 from __future__ import annotations
@@ -29,16 +30,17 @@ def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | Non
     with open(path, "r") as file:
         results = json.load(file)
 
-    if results["meta"]["potential"]["credit"] == "none":
-        raise ReferenceError("This run had credit disabled.")
+    history_credit = results["history"].get("epoch_credit_per_neuron") or []
+    if not any(layer is not None for epoch_c in history_credit for layer in (epoch_c or [])):
+        raise ReferenceError("This run logged no per-neuron credit.")
 
-    total_epochs = len(results["history"]["epoch_credit_per_neuron"])
+    total_epochs = len(history_credit)
 
     if epoch_idx == -1:
         epoch_idx = total_epochs - 1
 
     if epoch_idx > (total_epochs - 1):
-        raise IndexError("Selected epoch_idx {epoch_idx} is out of range of total number of epochs {total_epochs}.")
+        raise IndexError(f"Selected epoch_idx {epoch_idx} is out of range of total number of epochs {total_epochs}.")
 
     credit_data = results["history"]["epoch_credit_per_neuron"][epoch_idx]
 

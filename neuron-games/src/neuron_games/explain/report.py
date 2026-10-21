@@ -58,7 +58,7 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
     n_epochs = len(json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
                    ["history"].get("epoch_credit_per_neuron", []))
     if n_epochs == 0:
-        raise ValueError(f"{run_dir} has no per-epoch credit; was it trained with --credit?")
+        raise ValueError(f"{run_dir} has no per-epoch credit history")
 
     # Default hidden layer is 0
     layer_idx = 0

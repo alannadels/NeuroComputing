@@ -29,12 +29,23 @@ from .guard import forbid_autograd
 from .learning_rule import LayerSignals, three_factor_grads
 from .model import FCSNN
 from .modulator.base import CreditContext, build_credit
+from .modulator.eligibility_shapley import shapley_values
 from .modulator.random_feedback import RandomFeedback
 from .potential.barrier import project_
 from .potential.base import TermContext
 from .potential.potential import evaluate_potential, phi_value
 from .potential.task import output_error, spike_count_predictions, task_loss
 from .state import GameState
+
+
+def credit_metric(G: list[torch.Tensor], prev_delta_w: list[torch.Tensor | None],
+                  layers: list[int]) -> list[torch.Tensor | None]:
+    """Eligibility-Shapley credit phi_i = <G_i, dW_i^(n-1)> per credited layer
+    (None elsewhere and on the first window). Model-agnostic: G is the
+    sensitivity of the model's own training objective."""
+    return [shapley_values(G[l], prev_delta_w[l])
+            if (l in layers and prev_delta_w[l] is not None) else None
+            for l in range(len(G))]
 
 
 @dataclass
@@ -46,7 +57,8 @@ class WindowResult:
     components: dict[str, float]
     rates: list[float]
     credit_phi: list[torch.Tensor | None] = field(default_factory=list)   # per layer [N_l]
-    grad_norms: list[float] = field(default_factory=list)
+    grad_norms: list[float] = field(default_factory=list)                 # ||dC/dW_l|| applied
+    update_norms: list[float] = field(default_factory=list)               # ||W_after - W_before||
 
 
 class NeuronGame:
@@ -98,15 +110,16 @@ class NeuronGame:
         phi = phi_value(J, pot.components, cfg)
         reward = state.reward(phi)
 
-        # 6. credit
+        # 6. credit. phi_i = <G_i, dW_i^(n-1)> (eq. 22) is logged for every
+        # condition as a metric, so explainability runs on every model; the
+        # configured credit method only decides the training-time gains.
+        G = [-(tg + og) for tg, og in zip(task_grads, other_grads)]
+        credit_phi = credit_metric(G, state.prev_delta_w, self.credit_layers)
         gains: list[torch.Tensor | None] = [None] * len(params)
-        credit_phi: list[torch.Tensor | None] = [None] * len(params)
         if self.credit is not None:
-            G = [-(tg + og) for tg, og in zip(task_grads, other_grads)]
             res = self.credit(CreditContext(G=G, prev_delta_w=state.prev_delta_w,
                                             task_grads=task_grads, layers=self.credit_layers,
                                             cfg=cfg, window=state.window))
-            credit_phi = res.phi
             if cfg.credit_modulates:
                 gains = res.gains
 
@@ -132,6 +145,7 @@ class NeuronGame:
             rates=[float(s.mean()) for s in rec.spk],
             credit_phi=credit_phi,
             grad_norms=[float(g.norm()) for g in grads],
+            update_norms=[float(d.norm()) for d in state.prev_delta_w],
         )
 
     def state_dict(self) -> dict:

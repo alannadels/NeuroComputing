@@ -148,6 +148,8 @@ class NGRunConfig:
     device: str = "cuda"                  # never silently fall back
     energy_sample_hz: float = 20.0
     warmup_batches: int = 2
+    eval_steps: tuple[int, ...] = (5, 10, 15, 25)   # test-time sequence lengths for the step sweep
+    diag_batches: int = 4                 # validation batches for the per-epoch reference-Phi pass
 
     fingerprint: dict[str, Any] = field(default_factory=dict)
 
@@ -200,8 +202,9 @@ class NGRunConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "NGRunConfig":
         data = dict(data)
-        if isinstance(data.get("adam_betas"), list):
-            data["adam_betas"] = tuple(data["adam_betas"])
+        for key in ("adam_betas", "eval_steps"):
+            if isinstance(data.get(key), list):
+                data[key] = tuple(data[key])
         names = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in names})
 

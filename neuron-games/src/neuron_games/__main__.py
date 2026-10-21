@@ -85,7 +85,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     import torch
     from ._baseline import seed_everything
     from .data import loaders_for
-    from .timing import timed_inference
+    from .test_metrics import full_test_evaluation
     from .model import build_net
     from .runner import resolve_device
 
@@ -98,9 +98,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
     loaders = loaders_for(cfg, pin_memory=False)
     net = build_net(cfg).to(device)
     net.load_state_dict(ckpt["model_state"])
-    m, timing = timed_inference(net, loaders["test"], cfg, device, warmup_loader=loaders["val"])
-    print(json.dumps({"ckpt": str(Path(args.ckpt)), "epoch": ckpt.get("epoch"), "test": m,
-                      "inference": timing}, indent=2))
+    ev = full_test_evaluation(net, loaders, cfg, device)
+    print(json.dumps({"ckpt": str(Path(args.ckpt)), "epoch": ckpt.get("epoch"),
+                      "test": ev["metrics"], "inference": ev["timing"],
+                      "detailed": ev["detailed"], "steps_sweep": ev["sweep"]}, indent=2))
     return 0
 
 

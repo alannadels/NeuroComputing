@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "eval":
         if not args.ckpt:
             raise SystemExit("--mode eval needs --ckpt")
-        from neuron_games.timing import timed_inference
+        from neuron_games.test_metrics import full_test_evaluation
 
         ckpt_path = Path(args.ckpt)
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -112,12 +112,14 @@ def main(argv: list[str] | None = None) -> int:
         net = build_net(cfg).to(device)
         net.load_state_dict(ckpt["model_state"])
         loaders = loaders_for(cfg)
-        m, timing = timed_inference(net, loaders["test"], cfg, device, warmup_loader=loaders["val"])
+        ev = full_test_evaluation(net, loaders, cfg, device)
+        m, timing = ev["metrics"], ev["timing"]
         result = {"mode": "eval", "ckpt": str(ckpt_path), "epoch": ckpt.get("epoch"),
                   "condition": cfg.condition, "dataset": cfg.dataset,
                   "learning_rule": cfg.learning_rule, "split": "test",
                   "test_accuracy": m["accuracy"], "test_loss": m["loss"], "n": m["n"],
-                  "firing_rate": m["firing_rate"], "inference": timing}
+                  "firing_rate": m["firing_rate"], "inference": timing,
+                  "detailed": ev["detailed"], "steps_sweep": ev["sweep"]}
         # Saved next to the run: <run_dir>/eval.json (checkpoint lives in <run_dir>/checkpoints/)
         out_path = (ckpt_path.parent.parent if ckpt_path.parent.name == "checkpoints"
                     else ckpt_path.parent) / f"eval_{ckpt_path.stem}.json"
@@ -125,7 +127,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[eval] test_accuracy={m['accuracy']:.4f} n={m['n']}  "
               f"inference {timing['wall_s']:.2f}s, {timing['ms_per_image']:.3f} ms/image, "
               f"{timing['images_per_s']:.0f} images/s  -> {out_path}")
-        print("RESULT: " + json.dumps(result))
+        summary = {k: v for k, v in result.items() if k not in ("detailed", "steps_sweep")}
+        summary["balanced_accuracy"] = ev["detailed"]["balanced_accuracy"]
+        summary["ece"] = ev["detailed"]["calibration"]["ece"]
+        print("RESULT: " + json.dumps(summary))
         return 0
 
     overrides = {"dataset": args.dataset, "device": args.device, "data_dir": args.data_dir,
@@ -156,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
                    ("train", "val", "train_plus_val", "train_per_epoch", "val_per_epoch",
                     "train_plus_val_per_epoch", "test")},
         "test_ms_per_image": res["test_inference"]["ms_per_image"],
+        "test_balanced_accuracy": res["test"]["detailed"]["balanced_accuracy"],
+        "test_macro_f1": res["test"]["detailed"]["macro_f1"],
+        "test_ece": res["test"]["detailed"]["calibration"]["ece"],
+        "peak_mem_mib": {k: res["memory_mib"][k] for k in ("train_peak", "val_peak", "test_peak")},
         "train_energy_j": (res["energy"]["train"] or {}).get("energy_j"),
         "run_dir": str(out["run_dir"]),
     }
