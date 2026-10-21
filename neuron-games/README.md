@@ -164,25 +164,16 @@ explicitly elsewhere. Each run writes `runs/<condition>/<ts>/` with
   learning signal e-prop broadcasts; `ce_count` (plan §2.1's original default)
   is selectable with `--task-loss ce_count`.
 
-### What exists (2026-10-14): the no-backprop Neuron Games pipeline
+### Status (2026-10-21)
 
-The full module layout, who owns which file, and what is left to do are in
-[`../Architecture_Work_14-10-2026.md`](../Architecture_Work_14-10-2026.md).
-In short:
+Every component of the proposal is implemented: three-factor learning with
+random feedback, diversity V, metabolic and barrier energy E, regularizer R,
+Eligibility-Shapley and Shapley-Taylor credit, and the explainability suite.
+No-backprop training is autograd-free and audited on every run.
 
-- **Done and tested:** eligibility recording in the forward pass
-  (`model.py`), the three-factor rule (`learning_rule.py`), the windowed game
-  step (`game.py`, proposal §11), game state and reward (`state.py`),
-  random-feedback broadcast (`modulator/random_feedback.py`), the potential
-  term contract and composer (`potential/base.py`, `potential/potential.py`),
-  conditions / presets / CLI, and the training loop.
-  `--condition three_factor` trains end to end on MNIST with no backward
-  pass through the network (3 epochs, CPU: 91.8% test).
-- **Stubs with specs and acceptance tests:** V (`potential/diversity.py`),
-  E and R (`potential/metabolic.py`, `barrier.py`, `regularizer.py`),
-  Eligibility-Shapley and Shapley-Taylor (`modulator/`), post-hoc
-  explainability (`explain/`), `scripts/`. Their tests skip until the stub
-  stops raising `NotImplementedError`.
+**How to run the full pipeline, what it produces, and the current results are
+in the top-level [README](../README.md#running-the-full-pipeline).** Tuning
+reports and results tables are in `docs/experiments/`.
 
 ## Log
 
@@ -192,6 +183,8 @@ In short:
 - 2026-10-08 — `src/neuron_games/`: vendored LIF cell, 784-128-10 FC SNN, and the
   Row 2 BPTT anchor on that architecture (the existing baseline is a Conv-SNN,
   so Row 2 vs Row 4 needs its own FC anchor).
+- 2026-10-21 — Full pipeline (`scripts/run_comparison.sh`), metric suite for
+  every model, and the first 3-seed MNIST comparison; see the top-level README.
 - 2026-10-14 — Merged to `main`. Three-factor Neuron Games core (eligibility
   traces, learning rule, game step, potential contract, random feedback,
   conditions for Rows 4–7*); scaffolding for V / E / R / credit /

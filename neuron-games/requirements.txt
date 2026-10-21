@@ -1,0 +1,13 @@
+# Environment the 2026-10-21 MNIST comparison ran on (Python 3.12.3, CUDA 12.8,
+# NVIDIA RTX 5090). Install PyTorch from the CUDA 12.8 index first:
+#   uv pip install --index-url https://download.pytorch.org/whl/cu128 torch==2.11.0 torchvision==0.26.0
+# then the rest:
+#   uv pip install -r requirements.txt
+# (CPU / Apple Silicon: the default PyPI torch / torchvision wheels work.)
+torch==2.11.0
+torchvision==0.26.0
+numpy==2.5.2
+matplotlib==3.11.2
+pytest==9.1.1
+nvidia-ml-py==13.610.43   # GPU energy (NVML); runs without it, energy is then reported as null
+snntorch==1.0.0           # only for two cross-check tests; they skip without it

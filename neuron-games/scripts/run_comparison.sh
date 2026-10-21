@@ -27,7 +27,8 @@
 # In phase 2 a failed run does not stop the others; failures are listed at the
 # end and the script exits 1. The comparison report fails (exit 2) if the no-backprop runs
 # made any autograd call during training. PYTHON overrides the interpreter
-# (default: ~/ml/venvs/base/bin/python if present, else python3).
+# (default: the active virtualenv, else ~/ml/venvs/base/bin/python if present,
+# else python3).
 set -uo pipefail
 
 DATASET="mnist"
@@ -73,7 +74,9 @@ case "$EPOCHS" in ''|*[!0-9]*|0) die "--epochs must be a positive integer, got '
 cd "$(dirname "$0")/.." || die "cannot cd to neuron-games/"
 NG_ROOT="$(pwd)"
 if [ -z "${PYTHON:-}" ]; then
-    if [ -x "$HOME/ml/venvs/base/bin/python" ]; then PYTHON="$HOME/ml/venvs/base/bin/python"; else PYTHON="python3"; fi
+    if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then PYTHON="$VIRTUAL_ENV/bin/python"
+    elif [ -x "$HOME/ml/venvs/base/bin/python" ]; then PYTHON="$HOME/ml/venvs/base/bin/python"
+    else PYTHON="python3"; fi
 fi
 [ -n "$OUT" ] || OUT="runs/compare-${DATASET}-$(date +%Y%m%d-%H%M%S)"
 if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
