@@ -51,8 +51,8 @@ batch_init() {   # batch_init <NN> <title>
         [ "$(git rev-parse "$BATCH_TAG^{commit}")" = "$BATCH_COMMIT" ] \
             || _exp_die "tag $BATCH_TAG already exists on a different commit; use a new batch number"
     else
-        git tag -a "$BATCH_TAG" -m "Experiment batch $BATCH_ID: $BATCH_TITLE" "$BATCH_COMMIT" \
-            || _exp_die "cannot create tag $BATCH_TAG"
+        # lightweight tag: needs no git identity; the title is in batch_meta.json
+        git tag "$BATCH_TAG" "$BATCH_COMMIT" || _exp_die "cannot create tag $BATCH_TAG"
     fi
 
     # 2. log everything from here on
