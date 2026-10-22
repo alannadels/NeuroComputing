@@ -128,6 +128,16 @@ class NGRunConfig:
     # sum relu(rate_floor - rate_i)^2 for hidden neurons; 0 disables it.
     rate_floor: float = 0.0               # minimum firing rate, spikes per neuron per step
     c_floor: float = 10.0
+    # Adaptive thresholds (homeostatic intrinsic plasticity; thresholds are part of
+    # the game state Z, proposal section 4.2). After each window, every hidden
+    # neuron's threshold moves by threshold_eta * (its firing rate - threshold_target),
+    # clamped to [threshold_min, threshold_max]: silent neurons lower their
+    # threshold, overactive ones raise it. Not a gradient; no backprop.
+    threshold_adapt: bool = False
+    threshold_eta: float = 0.05
+    threshold_target: float = 0.03
+    threshold_min: float = 0.1
+    threshold_max: float = 5.0
 
     # --- R: conventional weight regularizer ---
     lam: float = 0.0
@@ -198,8 +208,10 @@ class NGRunConfig:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"
                                              or self.barrier != "none" or self.credit != "none"
-                                             or self.rate_floor > 0.0):
+                                             or self.rate_floor > 0.0 or self.threshold_adapt):
             raise ValueError("V / E / credit terms are only wired into the three_factor rule")
+        if self.threshold_adapt and self.diversity != "none" and self.diversity_feature == "plasticity_signature":
+            raise ValueError("plasticity_signature diversity assumes a fixed threshold")
         if self.credit_modulates and self.credit == "none":
             raise ValueError("credit_modulates=True needs a credit method")
 

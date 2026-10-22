@@ -67,13 +67,24 @@ class LIFLayer(nn.Module):
     """
 
     def __init__(self, fan_in: int, fan_out: int, alpha: float, threshold: float,
-                 surrogate_slope: float, bias: bool = False, spiking: bool = True):
+                 surrogate_slope: float, bias: bool = False, spiking: bool = True,
+                 adaptive_threshold: bool = False):
         super().__init__()
         self.fc = nn.Linear(fan_in, fan_out, bias=bias)
         self.alpha = alpha
         self.threshold = threshold
         self.surrogate_slope = surrogate_slope
         self.spiking = spiking
+        self.adaptive_threshold = adaptive_threshold
+        if adaptive_threshold:
+            # Per-neuron thresholds, changed only by homeostasis between windows
+            # (game.py), never by a gradient. Saved with the model.
+            self.register_buffer("theta", torch.full((fan_out,), float(threshold)))
+
+    @property
+    def thr(self):
+        """The firing threshold: per-neuron tensor if adaptive, else the scalar."""
+        return self.theta if self.adaptive_threshold else self.threshold
 
     def init_state(self, batch: int, device: torch.device, dtype: torch.dtype
                    ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -87,8 +98,8 @@ class LIFLayer(nn.Module):
         if not self.spiking:
             u = self.alpha * u + self.fc(x)
             return torch.zeros_like(u), u
-        u = self.alpha * u + self.fc(x) - self.threshold * s.detach()
-        s = spike(u - self.threshold, self.surrogate_slope)
+        u = self.alpha * u + self.fc(x) - self.thr * s.detach()
+        s = spike(u - self.thr, self.surrogate_slope)
         return s, u
 
 
@@ -139,7 +150,8 @@ class FCSNN(nn.Module):
 
     def __init__(self, n_in: int = 784, n_hidden: int = 128, n_out: int = 10,
                  alpha: float = 0.905, threshold: float = 1.0,
-                 surrogate_slope: float = 25.0, bias: bool = False, readout: str = "spike"):
+                 surrogate_slope: float = 25.0, bias: bool = False, readout: str = "spike",
+                 adaptive_threshold: bool = False):
         super().__init__()
         if readout not in ("spike", "leaky"):
             raise ValueError(f"unknown readout {readout!r}")
@@ -147,7 +159,7 @@ class FCSNN(nn.Module):
                   surrogate_slope=surrogate_slope, bias=bias)
         self.readout = readout
         self.layers = nn.ModuleList([
-            LIFLayer(n_in, n_hidden, **kw),
+            LIFLayer(n_in, n_hidden, adaptive_threshold=adaptive_threshold, **kw),
             LIFLayer(n_hidden, n_out, spiking=(readout == "spike"), **kw),
         ])
 
@@ -203,7 +215,7 @@ class FCSNN(nn.Module):
                         eps_buf[l][0].copy_(x_d)
                     else:
                         torch.add(x_d, eps_buf[l][t - 1], alpha=layer.alpha, out=eps_buf[l][t])
-                    h_buf[l][t] = fast_sigmoid_grad(u.detach() - layer.threshold,
+                    h_buf[l][t] = fast_sigmoid_grad(u.detach() - layer.thr,
                                                     layer.surrogate_slope)
                 if record_inputs and l > 0:
                     inp_buf[l][t] = inp.detach()
@@ -227,4 +239,5 @@ def build_net(cfg) -> FCSNN:
     return FCSNN(n_in=cfg.n_in, n_hidden=cfg.n_hidden, n_out=cfg.n_out,
                  alpha=cfg.alpha, threshold=cfg.threshold,
                  surrogate_slope=cfg.surrogate_slope, bias=cfg.bias,
-                 readout=getattr(cfg, "readout", "spike"))
+                 readout=getattr(cfg, "readout", "spike"),
+                 adaptive_threshold=getattr(cfg, "threshold_adapt", False))

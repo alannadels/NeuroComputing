@@ -71,8 +71,12 @@ class WindowResult:
 
 
 class NeuronGame:
-    def __init__(self, net: FCSNN, cfg, device: torch.device):
+    def __init__(self, net: FCSNN, cfg, device: torch.device, collect_metrics: bool = True):
+        """collect_metrics=False skips the per-step logging metrics (credit scores,
+        feedback alignment) that the learning rule itself does not need; the cost
+        benchmark uses it to time the pure learning step."""
         self.net = net
+        self.collect_metrics = collect_metrics
         self.cfg = cfg
         sizes = [layer.fc.out_features for layer in net.layers]
         self.feedback = RandomFeedback(sizes, seed=cfg.seed + cfg.feedback_seed_offset,
@@ -128,10 +132,14 @@ class NeuronGame:
         # 6. credit. phi_i = <G_i, dW_i^(n-1)> (eq. 22) is logged for every
         # condition as a metric, so explainability runs on every model; the
         # configured credit method only decides the training-time gains.
-        G = [-(tg + og) for tg, og in zip(task_grads, other_grads)]
-        credit_phi = credit_metric(G, state.prev_delta_w, self.credit_layers)
         gains: list[torch.Tensor | None] = [None] * len(params)
-        if self.credit is not None:
+        credit_phi: list[torch.Tensor | None] = [None] * len(params)
+        needs_credit = self.credit is not None and cfg.credit_modulates
+        if self.collect_metrics or needs_credit:
+            G = [-(tg + og) for tg, og in zip(task_grads, other_grads)]
+        if self.collect_metrics:
+            credit_phi = credit_metric(G, state.prev_delta_w, self.credit_layers)
+        if self.credit is not None and (self.collect_metrics or needs_credit):
             res = self.credit(CreditContext(G=G, prev_delta_w=state.prev_delta_w,
                                             task_grads=task_grads, layers=self.credit_layers,
                                             cfg=cfg, window=state.window))
@@ -151,6 +159,14 @@ class NeuronGame:
             project_(params, cfg)
         if cfg.feedback == "kolen_pollack":
             self.feedback.kolen_pollack_(params[-1].data, before[-1], cfg.feedback_decay)
+        if getattr(cfg, "threshold_adapt", False):
+            # Homeostatic intrinsic plasticity: move each hidden neuron's threshold
+            # toward its target firing rate (local; no gradient).
+            for l, layer in enumerate(net.layers[:-1]):
+                if layer.adaptive_threshold:
+                    rate = rec.spk[l].mean(dim=(0, 1))
+                    layer.theta.add_(cfg.threshold_eta * (rate - cfg.threshold_target)).clamp_(
+                        cfg.threshold_min, cfg.threshold_max)
         state.prev_delta_w = [w.detach() - b for w, b in zip(params, before)]
         state.update_rates(rec)
         state.window += 1
@@ -160,7 +176,8 @@ class NeuronGame:
         # averaged over the batch, with L_i the neuron's own task signal (the
         # random-feedback broadcast). First-order estimate of the task-loss
         # change from silencing neuron i.
-        taylor = [taylor_credit(rec.spk[l], task_sig[l].spike) if l in self.credit_layers else None
+        taylor = [taylor_credit(rec.spk[l], task_sig[l].spike)
+                  if (self.collect_metrics and l in self.credit_layers) else None
                   for l in range(len(params))]
         return WindowResult(
             J=J, acc=acc, phi=phi, reward=reward,
@@ -170,7 +187,7 @@ class NeuronGame:
             grad_norms=[float(g.norm()) for g in grads],
             update_norms=[float(d.norm()) for d in state.prev_delta_w],
             taylor_credit=taylor,
-            feedback_alignment=self.feedback.alignment(params[-1]),
+            feedback_alignment=self.feedback.alignment(params[-1]) if self.collect_metrics else None,
         )
 
     def state_dict(self) -> dict:

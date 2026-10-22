@@ -148,3 +148,64 @@ def test_kolen_pollack_aligns_feedback_without_backprop() -> None:
     assert calls.calls == 0
     assert res.feedback_alignment > max(start, 0.0) + 0.3
     assert sum(accs[-30:]) / 30 > 0.9
+
+
+def test_eligibility_exact_with_per_neuron_thresholds() -> None:
+    torch.manual_seed(2)
+    net = FCSNN(n_in=12, n_hidden=9, n_out=4, alpha=math.exp(-0.1), adaptive_threshold=True).double()
+    with torch.no_grad():
+        net.layers[0].fc.weight.mul_(3.0)
+        net.layers[0].theta.copy_(torch.linspace(0.3, 2.0, 9, dtype=torch.float64))
+    x = (torch.rand(15, 5, 12, dtype=torch.float64) < 0.4).double()
+    with torch.no_grad():
+        rec = net(x, record_traces=True, record_inputs=True)
+    a = torch.randn(rec.spk[0].shape, dtype=torch.float64)
+    lif = net.layers[0]
+    u, s = lif.init_state(5, x.device, x.dtype)
+    total = 0.0
+    for t in range(15):
+        s, u = lif.step(rec.inp[0][t], u, s)
+        total = total + (a[t] * s).sum()
+    (expected,) = torch.autograd.grad(total, lif.fc.weight)
+    got = layer_grad(rec, 0, LayerSignals(spike=a), lif.fc.weight)
+    torch.testing.assert_close(got, expected, rtol=1e-10, atol=1e-12)
+
+
+def test_adaptive_thresholds_move_toward_target_without_backprop() -> None:
+    torch.manual_seed(0)
+    cfg = NGRunConfig.for_condition("three_factor", n_in=12, n_hidden=9, n_out=4, device="cpu",
+                                    readout="leaky", threshold_adapt=True, threshold_target=0.1,
+                                    threshold_eta=0.5)
+    net = FCSNN(n_in=12, n_hidden=9, n_out=4, readout="leaky", adaptive_threshold=True)
+    with torch.no_grad():
+        net.layers[0].fc.weight.copy_(net.layers[0].fc.weight.abs() * 3.0)   # strong excitatory input
+        net.layers[0].fc.weight[:4] = 0.0      # no input at all: these neurons stay silent
+        net.layers[0].theta[4:] = 0.2          # these fire on most steps: overactive
+    game = NeuronGame(net, cfg, torch.device("cpu"))
+    opt = build_optimizer(net, cfg)
+    x = (torch.rand(10, 6, 12) < 0.5).float()
+    before = net.layers[0].theta.clone()
+    with count_autograd_calls() as calls:
+        game.step(x, torch.randint(0, 4, (6,)), opt)
+    after = net.layers[0].theta
+    assert calls.calls == 0
+    assert (after[:4] < before[:4]).all()       # silent neurons lower their threshold
+    assert (after[4:] > before[4:]).all()       # overactive neurons raise theirs
+    assert "layers.0.theta" in net.state_dict()     # saved with the model
+
+
+def test_metrics_off_gives_identical_update() -> None:
+    def run(collect):
+        torch.manual_seed(0)
+        cfg = NGRunConfig.for_condition("tf_div_energy", n_in=12, n_hidden=9, n_out=4, device="cpu",
+                                        readout="leaky", feedback="kolen_pollack")
+        net = FCSNN(n_in=12, n_hidden=9, n_out=4, readout="leaky")
+        game = NeuronGame(net, cfg, torch.device("cpu"), collect_metrics=collect)
+        opt = build_optimizer(net, cfg)
+        g = torch.Generator().manual_seed(1)
+        for _ in range(3):
+            x = (torch.rand(10, 6, 12, generator=g) < 0.4).float()
+            game.step(x, torch.randint(0, 4, (6,), generator=g), opt)
+        return [w.detach().clone() for w in net.weights]
+    for a, b in zip(run(True), run(False)):
+        torch.testing.assert_close(a, b)

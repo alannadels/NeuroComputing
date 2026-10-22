@@ -17,7 +17,8 @@ same conditions instead:
 - per repeat: synchronized wall time, GPU energy (NVML) and peak memory.
 
 Training cost is one full training step of the model's own learning rule
-(forward + update; the BPTT model includes its backward pass). Inference cost
+(forward + update; the BPTT model includes its backward pass), with per-step
+logging metrics (credit scores, feedback alignment) switched off for both. Inference cost
 is the forward pass with spike-count prediction on test batches, repeated
 --infer-passes times so each measurement window lasts over a second: the GPU
 energy counter is too coarse for windows of ~0.1 s.
@@ -70,7 +71,9 @@ def _load(exp_dir: Path, device):
 def _train_stepper(cfg, net, device):
     opt = build_optimizer(net, cfg)
     if cfg.learning_rule == "three_factor":
-        game = NeuronGame(net, cfg, device)
+        # Pure learning step: per-step logging metrics off (the backprop stepper
+        # below computes none either), so both models are timed on equal terms.
+        game = NeuronGame(net, cfg, device, collect_metrics=False)
         return lambda x, y: game.step(encode(x, cfg.num_steps, cfg.encoding), y, opt)
     loss_fn = task_loss(cfg.task_loss)
 
