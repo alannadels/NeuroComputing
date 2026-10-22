@@ -115,3 +115,36 @@ def test_taylor_credit_logged_for_both_models(condition, tmp_path) -> None:
     assert tc[0] is not None and len(tc[0]) == 16 and all(v >= 0 for v in tc[0])
     assert tc[1] is None
     assert h["epoch_val_sops_per_image"][-1] > 0
+
+
+def test_kolen_pollack_gap_shrinks_exactly() -> None:
+    from neuron_games.modulator.random_feedback import RandomFeedback
+    fb = RandomFeedback([9, 4], seed=0)
+    w_before = torch.randn(4, 9)
+    w_after = w_before + 0.1 * torch.randn(4, 9)
+    gap_before = fb.B[0] - w_before
+    w = w_after.clone()
+    fb.kolen_pollack_(w, w_before, decay=0.05)
+    torch.testing.assert_close(fb.B[0] - w, 0.95 * gap_before)
+
+
+def test_kolen_pollack_aligns_feedback_without_backprop() -> None:
+    torch.manual_seed(0)
+    n_in, C, T = 40, 3, 20
+    protos = torch.rand(C, n_in)
+    cfg = NGRunConfig.for_condition("three_factor", n_in=n_in, n_hidden=32, n_out=C, lr=1.0,
+                                    device="cpu", feedback="kolen_pollack", feedback_decay=1e-2)
+    net = FCSNN(n_in=n_in, n_hidden=32, n_out=C)
+    game = NeuronGame(net, cfg, torch.device("cpu"))
+    opt = build_optimizer(net, cfg)
+    start = game.feedback.alignment(net.weights[-1])
+    accs = []
+    with count_autograd_calls() as calls:
+        for _ in range(300):
+            y = torch.randint(0, C, (32,))
+            x = torch.bernoulli(protos[y].unsqueeze(0).expand(T, -1, -1))
+            res = game.step(x, y, opt)
+            accs.append(res.acc)
+    assert calls.calls == 0
+    assert res.feedback_alignment > max(start, 0.0) + 0.3
+    assert sum(accs[-30:]) / 30 > 0.9

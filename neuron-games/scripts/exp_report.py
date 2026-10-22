@@ -14,10 +14,14 @@ pending-analysis stub to experiments/EXPERIMENT_LOG.md.
 
 Fronts (higher/lower is better):
   accuracy        test accuracy (higher)
-  energy          training GPU energy (lower); synaptic ops / test image caused by the
-                  network's own spikes (lower; input-spike SOPs are identical for every model)
-  efficiency      training time per epoch (lower); peak training memory (lower);
+  energy          training GPU energy per step (lower); inference GPU energy per image
+                  (lower); synaptic ops / test image caused by the network's own spikes
+                  (lower; input-spike SOPs are identical for every model)
+  efficiency      training time per step (lower); peak training memory (lower);
                   inference latency (lower); epochs to 95% validation (lower)
+Time, energy and memory come from the controlled cost benchmark
+(cost_benchmark.json: same data, interleaved, repeated) when it exists; the
+end-to-end run numbers are kept in the results table for reference.
   explainability  faithfulness margin = acc(remove k random) - acc(remove top-k
                   credited); positive = faithful; best of the two credit scores (higher)
 """
@@ -46,7 +50,7 @@ def _margin(faith):
     return faith["random_mean"][-1] - faith["top"][-1]
 
 
-def metrics_of(res: dict, explain: dict | None) -> dict:
+def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> dict:
     h = res["history"]
     n_ep = max(len(h.get("epoch_val_acc", [])), 1)
     e95 = next((i + 1 for i, a in enumerate(h.get("epoch_val_acc", [])) if a >= 0.95), None)
@@ -78,20 +82,33 @@ def metrics_of(res: dict, explain: dict | None) -> dict:
         "learning_rule": _get(res, "meta", "learning_rule"),
         "lr_halvings": _get(res, "meta", "lr_schedule", "reductions"),
         "best_epoch": _get(res, "meta", "best_epoch"),
+        "feedback_alignment": (h.get("epoch_feedback_alignment") or [None])[-1],
+        # controlled benchmark (mean over repeats)
+        "bench_train_ms_step": _get(bench, "train_ms", 0),
+        "bench_train_mj_step": _get(bench, "train_mj", 0),
+        "bench_train_mem_mib": _get(bench, "train_mem", 0),
+        "bench_infer_ms_img": _get(bench, "infer_ms_img", 0),
+        "bench_infer_mj_img": _get(bench, "infer_mj_img", 0),
+        "bench_std": {k: _get(bench, k, 1) for k in ("train_ms", "train_mj", "train_mem",
+                                                      "infer_ms_img", "infer_mj_img")} if bench else None,
     }
 
 
 # (metric, better, front)
 FRONTS = [
     ("test_acc", "max", "accuracy"),
-    ("train_energy_kj", "min", "energy"),
+    ("bench_train_mj_step", "min", "energy"),
+    ("bench_infer_mj_img", "min", "energy"),
     ("sops_network_per_image", "min", "energy"),
-    ("train_s_per_epoch", "min", "efficiency"),
-    ("peak_train_mem_mib", "min", "efficiency"),
-    ("infer_ms_per_image", "min", "efficiency"),
+    ("bench_train_ms_step", "min", "efficiency"),
+    ("bench_train_mem_mib", "min", "efficiency"),
+    ("bench_infer_ms_img", "min", "efficiency"),
     ("epochs_to_95", "min", "efficiency"),
     ("faith_margin_best", "max", "explainability"),
 ]
+FRONT_LABELS = ["accuracy", "energy: train/step", "energy: infer/img", "energy: network SOPs",
+                "eff.: train ms/step", "eff.: train memory", "eff.: infer latency",
+                "eff.: epochs to 95%", "explainability"]
 
 
 def compare(m: dict, ref: dict) -> dict:
@@ -118,6 +135,9 @@ def _f(x, d=4, scale=1.0):
 
 def main(batch_dir: Path) -> int:
     meta = json.loads((batch_dir / "batch_meta.json").read_text())
+    bench_all = {}
+    if (batch_dir / "cost_benchmark.json").is_file():
+        bench_all = json.loads((batch_dir / "cost_benchmark.json").read_text()).get("summary", {})
     exps = []
     for exp_json in sorted(batch_dir.glob("*/experiment.json")):
         e = json.loads(exp_json.read_text())
@@ -125,7 +145,7 @@ def main(batch_dir: Path) -> int:
         res = json.loads((rd / "results.json").read_text()) if (rd / "results.json").is_file() else None
         exp = json.loads((rd / "explain.json").read_text()) if (rd / "explain.json").is_file() else None
         e["run_dir"] = str(rd.relative_to(batch_dir.parent.parent))
-        e["metrics"] = metrics_of(res, exp) if res else None
+        e["metrics"] = metrics_of(res, exp, bench_all.get(rd.name)) if res else None
         exps.append(e)
     by_id = {e["id"]: e for e in exps}
     default_ref = next((e["id"] for e in exps if e["id"].startswith("C")), None)
@@ -167,13 +187,25 @@ def main(batch_dir: Path) -> int:
           "removing the 64 top-credited ones (positive = credit is faithful).", "",
           "## Fronts vs reference\n",
           "Each metric compared with the experiment's reference run (win / loss / tie).\n",
-          "| ID | ref | accuracy | energy: train | energy: network SOPs | eff.: s/epoch | eff.: memory | "
-          "eff.: latency | eff.: epochs to 95% | explainability |", "|" + "---|" * 10]
+          "| ID | ref | " + " | ".join(FRONT_LABELS) + " |", "|" + "---|" * (len(FRONTS) + 1)]
     for e in exps:
         v = e["vs_reference"]
         if not v:
             continue
         L.append(f"| {e['id']} | {e['reference_used']} | " + " | ".join(v[k] for k, _, _ in FRONTS) + " |")
+    L += ["", "## Controlled cost benchmark\n",
+          "Same preloaded data, interleaved repeats (see `cost_benchmark.md`). Mean ± std.\n",
+          "| ID | train ms/step | train mJ/step | peak train MiB | infer ms/img | infer mJ/img | feedback alignment |",
+          "|---|---|---|---|---|---|---|"]
+    for e in exps:
+        m = e["metrics"]
+        if not m or m.get("bench_train_ms_step") is None:
+            continue
+        sd = m["bench_std"]
+        L.append(f"| {e['id']} | {_f(m['bench_train_ms_step'], 2)} ± {_f(sd['train_ms'], 2)} | "
+                 f"{_f(m['bench_train_mj_step'], 1)} ± {_f(sd['train_mj'], 1)} | "
+                 f"{_f(m['bench_train_mem_mib'], 1)} | {_f(m['bench_infer_ms_img'], 4)} ± {_f(sd['infer_ms_img'], 4)} | "
+                 f"{_f(m['bench_infer_mj_img'], 3)} ± {_f(sd['infer_mj_img'], 3)} | {_f(m['feedback_alignment'], 3)} |")
     L += ["", "## Reproduce\n",
           "Any experiment: `scripts/exp_reproduce.sh experiments/batch_"
           f"{meta['batch']}/<ID>_<slug>` (checks out the exact commit in a separate worktree and "

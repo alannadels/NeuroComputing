@@ -67,6 +67,7 @@ class WindowResult:
     grad_norms: list[float] = field(default_factory=list)                 # ||dC/dW_l|| applied
     update_norms: list[float] = field(default_factory=list)               # ||W_after - W_before||
     taylor_credit: list[torch.Tensor | None] = field(default_factory=list)  # per layer [N_l]
+    feedback_alignment: float | None = None   # cos(B, W_out)
 
 
 class NeuronGame:
@@ -148,6 +149,8 @@ class NeuronGame:
         optimizer.step()
         if cfg.barrier != "none":
             project_(params, cfg)
+        if cfg.feedback == "kolen_pollack":
+            self.feedback.kolen_pollack_(params[-1].data, before[-1], cfg.feedback_decay)
         state.prev_delta_w = [w.detach() - b for w, b in zip(params, before)]
         state.update_rates(rec)
         state.window += 1
@@ -167,6 +170,7 @@ class NeuronGame:
             grad_norms=[float(g.norm()) for g in grads],
             update_norms=[float(d.norm()) for d in state.prev_delta_w],
             taylor_credit=taylor,
+            feedback_alignment=self.feedback.alignment(params[-1]),
         )
 
     def state_dict(self) -> dict:

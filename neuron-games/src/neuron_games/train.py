@@ -97,14 +97,16 @@ class _EpochLog:
     def __init__(self, n_layers: int):
         self.n_layers = n_layers
         self.d: dict[str, list] = {k: [] for k in ("loss", "acc", "rates", "phi", "reward",
-                                                   "components", "grad_norms", "update_norms")}
+                                                   "components", "grad_norms", "update_norms",
+                                                   "feedback_alignment")}
         self.credit_sum: list[torch.Tensor | None] = [None] * n_layers
         self.credit_n = 0
         self.taylor_sum: list[torch.Tensor | None] = [None] * n_layers
         self.taylor_n = 0
 
     def add(self, *, loss, acc, rates, phi, reward, components, grad_norms, update_norms,
-            credit_phi, taylor=None) -> None:
+            credit_phi, taylor=None, feedback_alignment=None) -> None:
+        self.d["feedback_alignment"].append(feedback_alignment)
         for k, v in (("loss", loss), ("acc", acc), ("rates", rates), ("phi", phi),
                      ("reward", reward), ("components", components),
                      ("grad_norms", grad_norms), ("update_norms", update_norms)):
@@ -187,7 +189,7 @@ def _train_one_epoch_game(game: NeuronGame, loader, optimizer, cfg: NGRunConfig,
         log.add(loss=res.J, acc=res.acc, rates=res.rates, phi=res.phi, reward=res.reward,
                 components=res.components, grad_norms=res.grad_norms,
                 update_norms=res.update_norms, credit_phi=res.credit_phi,
-                taylor=res.taylor_credit)
+                taylor=res.taylor_credit, feedback_alignment=res.feedback_alignment)
         if bar is not None:
             bar.update(res.J, res.acc)
     return log.result()
@@ -284,6 +286,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         "epoch_credit_per_neuron": [],   # [epoch][layer] -> list[N_l] or None
         "epoch_taylor_credit_per_neuron": [],  # activity x learning signal, same layout
         "epoch_val_sops_per_image": [],  # synaptic operations per validation image
+        "epoch_feedback_alignment": [],  # cos(B, W_out) at the end of the epoch (no-backprop rule)
         "epoch_phi_ref":        [],      # Phi under the shared reference spec
         "epoch_phi_ref_components": [],
         "epoch_lr":             [],      # learning rate used during the epoch
@@ -345,6 +348,8 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         history["epoch_credit_per_neuron"].append(ep["credit_mean"])
         history["epoch_taylor_credit_per_neuron"].append(ep["taylor_mean"])
         history["epoch_val_sops_per_image"].append(val["sops"]["per_image"])
+        fa = [x for x in ep["feedback_alignment"] if x is not None]
+        history["epoch_feedback_alignment"].append(fa[-1] if fa else None)
         history["epoch_phi_ref"].append(ref["phi"])
         history["epoch_phi_ref_components"].append(ref["components"])
         history["epoch_lr"].append(schedule.lr)

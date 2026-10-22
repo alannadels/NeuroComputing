@@ -6,7 +6,18 @@ random matrix B_l in R^{N_out x N_l}, drawn once and never trained:
 
     L_l[t, b, i] = sum_k delta[t, b, k] * B_l[k, i]
 
-No weight transport (B is not W_out^T) and no backward pass. B_l uses the
+No weight transport (B is not W_out^T) and no backward pass.
+
+Kolen-Pollack variant (Kolen & Pollack 1994; Akrout et al. 2019): after every
+step, B receives the same update the output weights received, and both B and
+W_out decay by the same factor:
+
+    W_out <- (1 - d) W_out + dW_out,     B <- (1 - d) B + dW_out
+
+so B - W_out shrinks by (1 - d) per step and the feedback aligns with the
+output weights. The update to B is the output layer's own local update (its
+error times the presynaptic hidden activity), so nothing is propagated
+backwards through the network. B_l uses the
 same scale as nn.Linear's default init of an N_l -> N_out layer, times
 cfg.feedback_scale, and is drawn from its own generator so changing B never
 changes W's init.
@@ -33,6 +44,23 @@ class RandomFeedback:
     def broadcast(self, out_err: torch.Tensor) -> list[torch.Tensor]:
         """out_err: [T, B, N_out] -> one [T, B, N_l] signal per hidden layer."""
         return [out_err @ b for b in self.B]
+
+    @torch.no_grad()
+    def kolen_pollack_(self, w_out: torch.Tensor, w_out_before: torch.Tensor, decay: float) -> None:
+        """Apply one Kolen-Pollack step, given the output weights after and before
+        this step's update. Decays W_out in place and moves every B the same way."""
+        delta = w_out - w_out_before                  # the update the output layer took
+        w_out.sub_(decay * w_out_before)              # W' = (1 - d) W_before + dW
+        for i, b in enumerate(self.B):
+            if b.shape == delta.shape:                # B for the last hidden layer
+                self.B[i] = (1.0 - decay) * b + delta
+
+    def alignment(self, w_out: torch.Tensor) -> float | None:
+        """Cosine similarity between the last hidden layer's B and W_out."""
+        b = self.B[-1]
+        if b.shape != w_out.shape:
+            return None
+        return float(torch.nn.functional.cosine_similarity(b.flatten(), w_out.detach().flatten(), dim=0))
 
     def state_dict(self) -> dict:
         return {"B": [b.detach().cpu() for b in self.B]}

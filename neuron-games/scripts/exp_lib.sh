@@ -14,6 +14,7 @@
 #   - records environment (python, packages, GPU) and the test-suite result;
 #   - writes experiment.json per experiment: id, description, reference,
 #     commit, exact command, overrides, status, timings;
+#   - runs a controlled cost benchmark of every experiment (scripts/cost_benchmark.py);
 #   - generates BATCH_REPORT.md + batch_results.json and appends every
 #     experiment to experiments/VERSIONS.md (scripts/exp_report.py).
 set -uo pipefail
@@ -152,6 +153,9 @@ PY
 
 batch_finish() {
     echo
+    echo "[batch $BATCH_ID] controlled cost benchmark"
+    "$PY" scripts/cost_benchmark.py "$BATCH_DIR" --device "$EXP_DEVICE" > "$BATCH_DIR/cost_benchmark.log" 2>&1 \
+        || echo "[batch] cost benchmark failed (see cost_benchmark.log)"
     echo "[batch $BATCH_ID] generating report"
     "$PY" scripts/exp_report.py "$BATCH_DIR" || echo "[batch] report generation failed"
     echo "[batch $BATCH_ID] done: $((BATCH_N - ${#BATCH_FAILED[@]}))/$BATCH_N experiments succeeded"

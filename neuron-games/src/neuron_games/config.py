@@ -89,7 +89,11 @@ class NGRunConfig:
 
     # --- Learning rule ---
     learning_rule: str = "bptt"           # bptt (Row 2) | three_factor (Rows 4-7*)
-    feedback_scale: float = 1.0           # scale of the fixed random feedback matrices B
+    feedback_scale: float = 1.0           # scale of the initial random feedback matrices B
+    feedback: str = "random"              # random: B fixed | kolen_pollack: B receives the same
+                                          # update as the output weights, both decay by
+                                          # feedback_decay per step, so B -> W_out (local, no backprop)
+    feedback_decay: float = 1e-4          # kolen_pollack only: per-step decay of B and W_out
     feedback_seed_offset: int = 7919      # B is drawn from seed + offset, independent of W init
 
     # --- V: diversity (proposal §5) ---
@@ -183,6 +187,7 @@ class NGRunConfig:
         _check("credit_layers", self.credit_layers, ("hidden", "all"))
         _check("lr_schedule", self.lr_schedule, ("plateau", "none"))
         _check("readout", self.readout, ("spike", "leaky"))
+        _check("feedback", self.feedback, ("random", "kolen_pollack"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"
