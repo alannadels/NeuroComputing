@@ -201,7 +201,7 @@ def main(batch_dir: Path) -> int:
           "## Fronts vs reference\n",
           "Each metric compared with the experiment's reference run (win / loss / tie). Benchmark "
           "metrics whose difference is smaller than one standard deviation are 'tie (noise)'.\n",
-          "| ID | ref | " + " | ".join(FRONT_LABELS) + " |", "|" + "---|" * (len(FRONTS) + 1)]
+          "| ID | ref | " + " | ".join(FRONT_LABELS) + " |", "|" + "---|" * (len(FRONTS) + 2)]
     for e in exps:
         v = e["vs_reference"]
         if not v:
