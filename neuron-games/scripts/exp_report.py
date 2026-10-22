@@ -14,7 +14,8 @@ pending-analysis stub to experiments/EXPERIMENT_LOG.md.
 
 Fronts (higher/lower is better):
   accuracy        test accuracy (higher)
-  energy          training GPU energy (lower); inference synaptic ops / image (lower)
+  energy          training GPU energy (lower); synaptic ops / test image caused by the
+                  network's own spikes (lower; input-spike SOPs are identical for every model)
   efficiency      training time per epoch (lower); peak training memory (lower);
                   inference latency (lower); epochs to 95% validation (lower)
   explainability  faithfulness margin = acc(remove k random) - acc(remove top-k
@@ -62,6 +63,9 @@ def metrics_of(res: dict, explain: dict | None) -> dict:
         "peak_train_mem_mib": _get(res, "memory_mib", "train_peak"),
         "infer_ms_per_image": _get(res, "test_inference", "ms_per_image"),
         "sops_per_image": _get(res, "test", "sops", "per_image"),
+        # SOPs caused by the network's own spikes (input events are the same for every model)
+        "sops_network_per_image": (sum((_get(res, "test", "sops", "per_layer") or [])[1:])
+                                   if _get(res, "test", "sops", "per_layer") else None),
         "sops_fraction_of_dense": _get(res, "test", "sops", "fraction_of_dense"),
         "hidden_rate": res["test"]["firing_rate"][0],
         "epochs_to_95": e95,
@@ -81,7 +85,7 @@ def metrics_of(res: dict, explain: dict | None) -> dict:
 FRONTS = [
     ("test_acc", "max", "accuracy"),
     ("train_energy_kj", "min", "energy"),
-    ("sops_per_image", "min", "energy"),
+    ("sops_network_per_image", "min", "energy"),
     ("train_s_per_epoch", "min", "efficiency"),
     ("peak_train_mem_mib", "min", "efficiency"),
     ("infer_ms_per_image", "min", "efficiency"),
@@ -145,25 +149,25 @@ def main(batch_dir: Path) -> int:
                  f"{e['reference_used'] or '--'} | {status} |")
     L += ["", "## Results\n",
           "| ID | test acc | best val | bal. acc | ECE (ts) | s/epoch | train kJ | peak train MiB | "
-          "infer ms/img | SOPs/img | hidden rate | epochs to 95% | faith. margin Shapley | "
+          "infer ms/img | SOPs/img (total) | SOPs/img (network) | hidden rate | epochs to 95% | faith. margin Shapley | "
           "faith. margin act x signal | stability Shapley | stability act x signal | autograd calls |",
-          "|" + "---|" * 17]
+          "|" + "---|" * 18]
     for e in exps:
         m = e["metrics"]
         if not m:
-            L.append(f"| {e['id']} | " + " | ".join(["--"] * 16) + " |")
+            L.append(f"| {e['id']} | " + " | ".join(["--"] * 17) + " |")
             continue
         L.append(f"| {e['id']} | {_f(m['test_acc'])} | {_f(m['best_val_acc'])} | {_f(m['balanced_acc'])} | "
                  f"{_f(m['ece_ts'])} | {_f(m['train_s_per_epoch'], 2)} | {_f(m['train_energy_kj'], 2)} | "
                  f"{_f(m['peak_train_mem_mib'], 1)} | {_f(m['infer_ms_per_image'], 4)} | "
-                 f"{_f(m['sops_per_image'], 0)} | {_f(m['hidden_rate'], 3)} | {_f(m['epochs_to_95'])} | "
+                 f"{_f(m['sops_per_image'], 0)} | {_f(m['sops_network_per_image'], 0)} | {_f(m['hidden_rate'], 3)} | {_f(m['epochs_to_95'])} | "
                  f"{_f(m['faith_margin_shapley'])} | {_f(m['faith_margin_taylor'])} | "
                  f"{_f(m['stability_shapley'], 3)} | {_f(m['stability_taylor'], 3)} | {_f(m['autograd_calls'])} |")
     L += ["", "Faithfulness margin = test accuracy after removing 64 random hidden neurons minus after "
           "removing the 64 top-credited ones (positive = credit is faithful).", "",
           "## Fronts vs reference\n",
           "Each metric compared with the experiment's reference run (win / loss / tie).\n",
-          "| ID | ref | accuracy | energy: train | energy: SOPs | eff.: s/epoch | eff.: memory | "
+          "| ID | ref | accuracy | energy: train | energy: network SOPs | eff.: s/epoch | eff.: memory | "
           "eff.: latency | eff.: epochs to 95% | explainability |", "|" + "---|" * 10]
     for e in exps:
         v = e["vs_reference"]
@@ -199,7 +203,7 @@ def main(batch_dir: Path) -> int:
             f"- settings: `{' '.join(e['overrides']) or '(defaults)'}` "
             f"(full resolved config: `{e['run_dir']}/config.json`)\n"
             f"- result: test acc {_f(m.get('test_acc'))}, train {_f(m.get('train_energy_kj'), 2)} kJ, "
-            f"SOPs/img {_f(m.get('sops_per_image'), 0)}, faithfulness margin {_f(m.get('faith_margin_best'))}"
+            f"network SOPs/img {_f(m.get('sops_network_per_image'), 0)}, faithfulness margin {_f(m.get('faith_margin_best'))}"
             f"{'' if e['exit_code'] == 0 else ' (RUN FAILED)'}\n"
             f"- restore: `scripts/exp_reproduce.sh {e['run_dir']}`\n")
     if entries:

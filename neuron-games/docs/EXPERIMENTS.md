@@ -83,6 +83,6 @@ Each experiment is scored against its reference on:
 | front | metrics (better) |
 |---|---|
 | accuracy | test accuracy (higher) |
-| energy | training GPU energy (lower); synaptic operations per test image (lower) |
+| energy | training GPU energy (lower); synaptic operations per test image caused by the network's own spikes (lower; input-spike operations are identical for every model) |
 | efficiency | training time per epoch, peak training memory, inference latency, epochs to 95% validation accuracy (lower) |
 | explainability | faithfulness margin: accuracy after removing 64 random hidden neurons minus after removing the 64 top-credited ones, best of the two credit scores (higher; positive = faithful) |
