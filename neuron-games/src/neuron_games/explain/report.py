@@ -53,48 +53,50 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
     # Typically test loader is the last element or explicitly indexed
     test_loader = loaders[-1] if isinstance(loaders, (list, tuple)) else loaders.get("test", loaders)
     
-    # 5. Credit vectors per epoch, from results.json (written by train.py as
-    # history["epoch_credit_per_neuron"]); the checkpoint does not store them.
-    n_epochs = len(json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
-                   ["history"].get("epoch_credit_per_neuron", []))
-    if n_epochs == 0:
-        raise ValueError(f"{run_dir} has no per-epoch credit history")
+    # 5. Credit vectors per epoch, from results.json (written by train.py); the
+    # checkpoint does not store them. Two credit scores, both logged for every
+    # model: Eligibility-Shapley phi_i = <G_i, dW_i(prev)> and the activity x
+    # learning-signal ("taylor") credit.
+    history = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))["history"]
 
     # Default hidden layer is 0
     layer_idx = 0
 
-    def _layer_credit(epoch: int) -> torch.Tensor:
-        c = load_credit(run_dir, epoch)[layer_idx]
-        if c is None:
-            raise ValueError(f"layer {layer_idx} was not credited in {run_dir}")
-        return c.to(device)
+    def _evaluate_credit(key: str) -> dict | None:
+        n_epochs = len(history.get(key) or [])
+        if n_epochs == 0:
+            return None
 
-    # Get last epoch's credit for faithfulness and sparsity
-    last_credit = _layer_credit(n_epochs - 1)
+        def _layer_credit(epoch: int) -> torch.Tensor:
+            c = load_credit(run_dir, epoch, key=key)[layer_idx]
+            if c is None:
+                raise ValueError(f"layer {layer_idx} was not credited in {run_dir}")
+            return c.to(device)
 
-    # Compute faithfulness curve (k never exceeds the layer size)
-    n_neurons = last_credit.numel()
-    ks = sorted({min(k, n_neurons) for k in [0, 8, 16, 32, 64]})
-    faith_results = faithfulness_curve(net, test_loader, cfg, device, last_credit,
-                                       layer=layer_idx, ks=ks)
+        last_credit = _layer_credit(n_epochs - 1)
+        n_neurons = last_credit.numel()
+        ks = sorted({min(k, n_neurons) for k in [0, 8, 16, 32, 64]})
+        faith = faithfulness_curve(net, test_loader, cfg, device, last_credit, layer=layer_idx, ks=ks)
+        if n_epochs >= 2:
+            stab = stability(_layer_credit(n_epochs - 2), last_credit)
+        else:
+            stab = {"spearman": None, "top10_jaccard": None, "note": "needs at least 2 epochs"}
+        return {"faithfulness": faith, "stability": stab, "sparsity": sparsity(last_credit)}
 
-    # Compute stability between last two epochs (None with a single epoch)
-    if n_epochs >= 2:
-        stab_results = stability(_layer_credit(n_epochs - 2), last_credit)
-    else:
-        stab_results = {"spearman": None, "top10_jaccard": None,
-                        "note": "needs at least 2 epochs"}
-        
-    # Compute sparsity of the last epoch's credit
-    sparsity_results = sparsity(last_credit)
-    
-    # Assemble final report dictionary
+    shapley = _evaluate_credit("epoch_credit_per_neuron")
+    if shapley is None:
+        raise ValueError(f"{run_dir} has no per-epoch credit history")
+    taylor = _evaluate_credit("epoch_taylor_credit_per_neuron")
+    faith_results = shapley["faithfulness"]
+
+    # Assemble final report dictionary (top level: Eligibility-Shapley credit)
     report = {
-        "faithfulness": faith_results,
-        "stability": stab_results,
-        "sparsity": sparsity_results
+        "faithfulness": shapley["faithfulness"],
+        "stability": shapley["stability"],
+        "sparsity": shapley["sparsity"],
+        "taylor": taylor,
     }
-    
+
     # 6. Write explain.json
     explain_path = run_dir / "explain.json"
     with open(explain_path, "w") as f:
@@ -109,6 +111,12 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
     k_vals = faith_results["k"]
     plt.plot(k_vals, faith_results["top"], marker='o', label='Top-k Removed (Highest Credit)', color='red')
     plt.plot(k_vals, faith_results["bottom"], marker='s', label='Bottom-k Removed (Lowest Credit)', color='blue')
+    if taylor is not None:
+        tf = taylor["faithfulness"]
+        plt.plot(tf["k"], tf["top"], marker='o', linestyle='--', color='darkred',
+                 label='Top-k Removed (activity x learning-signal credit)')
+        plt.plot(tf["k"], tf["bottom"], marker='s', linestyle='--', color='darkblue',
+                 label='Bottom-k Removed (activity x learning-signal credit)')
     
     # Plot random mean with confidence interval (std) if available
     rand_mean = faith_results["random_mean"]

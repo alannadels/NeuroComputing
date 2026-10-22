@@ -59,15 +59,21 @@ def spike(v: torch.Tensor, slope: float) -> torch.Tensor:
 
 
 class LIFLayer(nn.Module):
-    """Linear synapses followed by subtract-reset LIF neurons."""
+    """Linear synapses followed by subtract-reset LIF neurons.
+
+    spiking=False makes it a leaky integrator read-out (e-prop style): the
+    membrane u[t] = alpha * u[t-1] + W x[t] is the output, with no threshold,
+    spike or reset. Its eligibility factor is still eps (du/dW = eps).
+    """
 
     def __init__(self, fan_in: int, fan_out: int, alpha: float, threshold: float,
-                 surrogate_slope: float, bias: bool = False):
+                 surrogate_slope: float, bias: bool = False, spiking: bool = True):
         super().__init__()
         self.fc = nn.Linear(fan_in, fan_out, bias=bias)
         self.alpha = alpha
         self.threshold = threshold
         self.surrogate_slope = surrogate_slope
+        self.spiking = spiking
 
     def init_state(self, batch: int, device: torch.device, dtype: torch.dtype
                    ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -76,7 +82,11 @@ class LIFLayer(nn.Module):
 
     def step(self, x: torch.Tensor, u: torch.Tensor, s: torch.Tensor
              ) -> tuple[torch.Tensor, torch.Tensor]:
-        """One time step. Returns (s[t], u[t]) given input x[t] and (u[t-1], s[t-1])."""
+        """One time step. Returns (s[t], u[t]) given input x[t] and (u[t-1], s[t-1]).
+        A non-spiking read-out returns s = 0 (it never spikes)."""
+        if not self.spiking:
+            u = self.alpha * u + self.fc(x)
+            return torch.zeros_like(u), u
         u = self.alpha * u + self.fc(x) - self.threshold * s.detach()
         s = spike(u - self.threshold, self.surrogate_slope)
         return s, u
@@ -105,10 +115,19 @@ class SNNRecord:
     inp: list[torch.Tensor] | None = None
     eps: list[torch.Tensor] | None = None
     h: list[torch.Tensor] | None = None
+    readout: str = "spike"                      # "spike" | "leaky"
+    hidden_spike_steps: list[torch.Tensor] | None = None   # per-step hidden spikes (retain_spike_grads)
 
     @property
-    def out_spk(self) -> torch.Tensor:
-        return self.spk[-1]
+    def out(self) -> torch.Tensor:
+        """Output evidence [T, B, C]: output spikes (spiking read-out) or the
+        read-out membrane (leaky read-out). Losses, predictions and learning
+        signals all use this."""
+        return self.mem[-1] if self.readout == "leaky" else self.spk[-1]
+
+    @property
+    def out_spk(self) -> torch.Tensor:          # kept for older call sites
+        return self.out
 
     @property
     def has_traces(self) -> bool:
@@ -120,13 +139,16 @@ class FCSNN(nn.Module):
 
     def __init__(self, n_in: int = 784, n_hidden: int = 128, n_out: int = 10,
                  alpha: float = 0.905, threshold: float = 1.0,
-                 surrogate_slope: float = 25.0, bias: bool = False):
+                 surrogate_slope: float = 25.0, bias: bool = False, readout: str = "spike"):
         super().__init__()
+        if readout not in ("spike", "leaky"):
+            raise ValueError(f"unknown readout {readout!r}")
         kw = dict(alpha=alpha, threshold=threshold,
                   surrogate_slope=surrogate_slope, bias=bias)
+        self.readout = readout
         self.layers = nn.ModuleList([
             LIFLayer(n_in, n_hidden, **kw),
-            LIFLayer(n_hidden, n_out, **kw),
+            LIFLayer(n_hidden, n_out, spiking=(readout == "spike"), **kw),
         ])
 
     @property
@@ -136,7 +158,7 @@ class FCSNN(nn.Module):
 
     def forward(self, x_seq: torch.Tensor, record_traces: bool = False,
                 masks: list[torch.Tensor | None] | None = None,
-                record_inputs: bool = False) -> SNNRecord:
+                record_inputs: bool = False, retain_spike_grads: bool = False) -> SNNRecord:
         """x_seq: [T, B, n_in]. State starts at zero on every call.
 
         record_traces: also record eps / h (see SNNRecord), written into
@@ -144,6 +166,9 @@ class FCSNN(nn.Module):
             costs O(T * B * fan_in) memory per layer.
         record_inputs: also record each layer's input (rec.inp). Only tests
             need it; training does not, so it is off by default.
+        retain_spike_grads: keep the hidden layer's per-step spike tensors with
+            .retain_grad() (rec.hidden_spike_steps), so a BPTT model can read
+            dJ/ds after backward for the activity x learning-signal credit.
         masks: optional per-layer [N_l] multipliers applied to that layer's
             spikes (0 silences a neuron). Used by post-hoc attribution to
             remove neurons; None everywhere means the plain network.
@@ -161,6 +186,7 @@ class FCSNN(nn.Module):
         if record_inputs:
             inp_buf = [None] + [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in[1:]]
 
+        hidden_steps: list[torch.Tensor] = []
         for t in range(T):
             inp = x_seq[t]
             for l, layer in enumerate(self.layers):
@@ -168,6 +194,9 @@ class FCSNN(nn.Module):
                 s, u = layer.step(inp, u, s)
                 if masks is not None and masks[l] is not None:
                     s = s * masks[l]
+                if retain_spike_grads and l == 0 and s.requires_grad:
+                    s.retain_grad()
+                    hidden_steps.append(s)
                 if record_traces:            # traces are constants for the learning rule
                     x_d = inp.detach()
                     if t == 0:
@@ -184,7 +213,9 @@ class FCSNN(nn.Module):
                 inp = s
 
         rec = SNNRecord(spk=[torch.stack(r) for r in spk],
-                        mem=[torch.stack(r) for r in mem])
+                        mem=[torch.stack(r) for r in mem], readout=self.readout)
+        if retain_spike_grads:
+            rec.hidden_spike_steps = hidden_steps
         if record_traces:
             rec.eps, rec.h = eps_buf, h_buf
         if record_inputs:
@@ -195,4 +226,5 @@ class FCSNN(nn.Module):
 def build_net(cfg) -> FCSNN:
     return FCSNN(n_in=cfg.n_in, n_hidden=cfg.n_hidden, n_out=cfg.n_out,
                  alpha=cfg.alpha, threshold=cfg.threshold,
-                 surrogate_slope=cfg.surrogate_slope, bias=cfg.bias)
+                 surrogate_slope=cfg.surrogate_slope, bias=cfg.bias,
+                 readout=getattr(cfg, "readout", "spike"))

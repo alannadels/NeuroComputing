@@ -48,6 +48,13 @@ def credit_metric(G: list[torch.Tensor], prev_delta_w: list[torch.Tensor | None]
             for l in range(len(G))]
 
 
+def taylor_credit(spk: torch.Tensor, signal: torch.Tensor | None) -> torch.Tensor | None:
+    """mean_b |sum_t s_i[t, b] * L_i[t, b]| -> [N_l]. spk, signal: [T, B, N_l]."""
+    if signal is None:
+        return None
+    return (spk * signal).sum(dim=0).abs().mean(dim=0)
+
+
 @dataclass
 class WindowResult:
     J: float
@@ -59,6 +66,7 @@ class WindowResult:
     credit_phi: list[torch.Tensor | None] = field(default_factory=list)   # per layer [N_l]
     grad_norms: list[float] = field(default_factory=list)                 # ||dC/dW_l|| applied
     update_norms: list[float] = field(default_factory=list)               # ||W_after - W_before||
+    taylor_credit: list[torch.Tensor | None] = field(default_factory=list)  # per layer [N_l]
 
 
 class NeuronGame:
@@ -78,10 +86,15 @@ class NeuronGame:
         for p in net.parameters():
             p.requires_grad_(False)
 
-    def task_signals(self, out_spk: torch.Tensor, targets: torch.Tensor) -> list[LayerSignals]:
-        delta = output_error(self.cfg.task_loss, out_spk, targets)
-        return [LayerSignals(spike=s) for s in self.feedback.broadcast(delta)] + \
-               [LayerSignals(spike=delta)]
+    def task_signals(self, out: torch.Tensor, targets: torch.Tensor) -> list[LayerSignals]:
+        """Output error dJ/d(out)[t] at the read-out, broadcast to hidden layers.
+        Spiking read-out: the error is on the output spikes (spike pathway, x h).
+        Leaky read-out: it is on the read-out membrane (membrane pathway, du/dW = eps)."""
+        delta = output_error(self.cfg.task_loss, out, targets)
+        hidden = [LayerSignals(spike=s) for s in self.feedback.broadcast(delta)]
+        if getattr(self.net, "readout", "spike") == "leaky":
+            return hidden + [LayerSignals(mem=delta)]
+        return hidden + [LayerSignals(spike=delta)]
 
     @torch.no_grad()
     def step(self, x_seq: torch.Tensor, targets: torch.Tensor,
@@ -99,8 +112,9 @@ class NeuronGame:
         rec = net(x_seq, record_traces=True)
 
         # 2. task signal (J)
-        J = float(self.loss_fn(rec.out_spk, targets))
-        task_grads = three_factor_grads(rec, self.task_signals(rec.out_spk, targets), W)
+        J = float(self.loss_fn(rec.out, targets))
+        task_sig = self.task_signals(rec.out, targets)
+        task_grads = three_factor_grads(rec, task_sig, W)
 
         # 3-4. other potential terms
         pot = evaluate_potential(TermContext(rec=rec, weights=W, cfg=cfg, epoch=epoch, state=state))
@@ -138,7 +152,13 @@ class NeuronGame:
         state.update_rates(rec)
         state.window += 1
 
-        acc = float((spike_count_predictions(rec.out_spk) == targets).float().mean())
+        acc = float((spike_count_predictions(rec.out) == targets).float().mean())
+        # Activity x learning-signal credit: |sum_t s_i[t] * L_i[t]| per example,
+        # averaged over the batch, with L_i the neuron's own task signal (the
+        # random-feedback broadcast). First-order estimate of the task-loss
+        # change from silencing neuron i.
+        taylor = [taylor_credit(rec.spk[l], task_sig[l].spike) if l in self.credit_layers else None
+                  for l in range(len(params))]
         return WindowResult(
             J=J, acc=acc, phi=phi, reward=reward,
             components={"J": J, **pot.components, **pot.info},
@@ -146,6 +166,7 @@ class NeuronGame:
             credit_phi=credit_phi,
             grad_norms=[float(g.norm()) for g in grads],
             update_norms=[float(d.norm()) for d in state.prev_delta_w],
+            taylor_credit=taylor,
         )
 
     def state_dict(self) -> dict:

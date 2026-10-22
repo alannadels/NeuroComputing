@@ -78,6 +78,8 @@ class NGRunConfig:
     threshold: float = 1.0
     surrogate_slope: float = 25.0         # fast-sigmoid k
     bias: bool = False                    # every trainable parameter is a synapse w_ij
+    readout: str = "spike"                # spike: LIF output neurons | leaky: non-spiking
+                                          # leaky-integrator read-out (membrane = logits)
 
     # --- Input / task (J) ---
     dataset: str = "MNIST"                # MNIST | FashionMNIST (aliases: mnist, fashion_mnist)
@@ -180,6 +182,7 @@ class NGRunConfig:
         _check("credit", self.credit, CREDIT)
         _check("credit_layers", self.credit_layers, ("hidden", "all"))
         _check("lr_schedule", self.lr_schedule, ("plateau", "none"))
+        _check("readout", self.readout, ("spike", "leaky"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"

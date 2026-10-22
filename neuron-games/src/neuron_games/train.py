@@ -32,7 +32,7 @@ import torch
 from .config import CONDITION_PRESETS, NGRunConfig
 from .encoding import encode
 from .eval import evaluate
-from .game import NeuronGame, credit_metric
+from .game import NeuronGame, credit_metric, taylor_credit
 from .model import build_net
 from .potential.base import TermContext
 from .potential.potential import active_terms, phi_value
@@ -100,9 +100,11 @@ class _EpochLog:
                                                    "components", "grad_norms", "update_norms")}
         self.credit_sum: list[torch.Tensor | None] = [None] * n_layers
         self.credit_n = 0
+        self.taylor_sum: list[torch.Tensor | None] = [None] * n_layers
+        self.taylor_n = 0
 
     def add(self, *, loss, acc, rates, phi, reward, components, grad_norms, update_norms,
-            credit_phi) -> None:
+            credit_phi, taylor=None) -> None:
         for k, v in (("loss", loss), ("acc", acc), ("rates", rates), ("phi", phi),
                      ("reward", reward), ("components", components),
                      ("grad_norms", grad_norms), ("update_norms", update_norms)):
@@ -112,11 +114,18 @@ class _EpochLog:
             for l, c in enumerate(credit_phi):
                 if c is not None:
                     self.credit_sum[l] = c.clone() if self.credit_sum[l] is None else self.credit_sum[l] + c
+        if taylor is not None and any(c is not None for c in taylor):
+            self.taylor_n += 1
+            for l, c in enumerate(taylor):
+                if c is not None:
+                    self.taylor_sum[l] = c.clone() if self.taylor_sum[l] is None else self.taylor_sum[l] + c
 
     def result(self) -> dict:
         out = dict(self.d)
         out["credit_mean"] = [None if c is None else (c / self.credit_n).cpu().tolist()
                               for c in self.credit_sum]
+        out["taylor_mean"] = [None if c is None else (c / self.taylor_n).cpu().tolist()
+                              for c in self.taylor_sum]
         return out
 
 
@@ -133,7 +142,7 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
         data = data.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        rec = net(encode(data, cfg.num_steps, cfg.encoding))
+        rec = net(encode(data, cfg.num_steps, cfg.encoding), retain_spike_grads=True)
         loss = loss_fn(rec.out_spk, targets)
 
         optimizer.zero_grad(set_to_none=True)
@@ -141,6 +150,10 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
         with torch.no_grad():
             grads = [p.grad.detach() for p in params]
             credit_phi = credit_metric([-g for g in grads], state["prev_delta_w"], layers)
+            # Activity x learning signal with the model's own signal: the exact dJ/ds.
+            ds = [s.grad if s.grad is not None else torch.zeros_like(s) for s in rec.hidden_spike_steps]
+            taylor = [taylor_credit(rec.spk[0].detach(), torch.stack(ds)) if 0 in layers else None] + \
+                     [None] * (len(params) - 1)
             before = [p.detach().clone() for p in params]
         optimizer.step()
         with torch.no_grad():
@@ -155,7 +168,7 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
                 phi=phi, reward=reward, components={"J": J},
                 grad_norms=[float(g.norm()) for g in grads],
                 update_norms=[float(d.norm()) for d in state["prev_delta_w"]],
-                credit_phi=credit_phi)
+                credit_phi=credit_phi, taylor=taylor)
         if bar is not None:
             bar.update(J, acc)
     return log.result()
@@ -173,7 +186,8 @@ def _train_one_epoch_game(game: NeuronGame, loader, optimizer, cfg: NGRunConfig,
         res = game.step(encode(data, cfg.num_steps, cfg.encoding), targets, optimizer, epoch)
         log.add(loss=res.J, acc=res.acc, rates=res.rates, phi=res.phi, reward=res.reward,
                 components=res.components, grad_norms=res.grad_norms,
-                update_norms=res.update_norms, credit_phi=res.credit_phi)
+                update_norms=res.update_norms, credit_phi=res.credit_phi,
+                taylor=res.taylor_credit)
         if bar is not None:
             bar.update(res.J, res.acc)
     return log.result()
@@ -268,6 +282,8 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         "epoch_grad_norm":      [],      # [epoch][layer] mean ||gradient||
         "epoch_update_norm":    [],      # [epoch][layer] mean ||W_after - W_before||
         "epoch_credit_per_neuron": [],   # [epoch][layer] -> list[N_l] or None
+        "epoch_taylor_credit_per_neuron": [],  # activity x learning signal, same layout
+        "epoch_val_sops_per_image": [],  # synaptic operations per validation image
         "epoch_phi_ref":        [],      # Phi under the shared reference spec
         "epoch_phi_ref_components": [],
         "epoch_lr":             [],      # learning rate used during the epoch
@@ -327,6 +343,8 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
         history["epoch_grad_norm"].append(_mean_layers(ep["grad_norms"]))
         history["epoch_update_norm"].append(_mean_layers(ep["update_norms"]))
         history["epoch_credit_per_neuron"].append(ep["credit_mean"])
+        history["epoch_taylor_credit_per_neuron"].append(ep["taylor_mean"])
+        history["epoch_val_sops_per_image"].append(val["sops"]["per_image"])
         history["epoch_phi_ref"].append(ref["phi"])
         history["epoch_phi_ref_components"].append(ref["components"])
         history["epoch_lr"].append(schedule.lr)

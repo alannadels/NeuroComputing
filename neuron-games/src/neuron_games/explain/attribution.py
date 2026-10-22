@@ -16,7 +16,8 @@ from pathlib import Path
 import torch
 import json
 
-def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | None]:
+def load_credit(run_dir: str | Path, epoch: int = -1,
+                key: str = "epoch_credit_per_neuron") -> list[torch.Tensor | None]:
     """Per-layer credit vectors [N_l] for one epoch (default: last) of a run.
 
     Read run_dir/results.json, take history["epoch_credit_per_neuron"][epoch],
@@ -30,7 +31,7 @@ def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | Non
     with open(path, "r") as file:
         results = json.load(file)
 
-    history_credit = results["history"].get("epoch_credit_per_neuron") or []
+    history_credit = results["history"].get(key) or []
     if not any(layer is not None for epoch_c in history_credit for layer in (epoch_c or [])):
         raise ReferenceError("This run logged no per-neuron credit.")
 
@@ -42,7 +43,7 @@ def load_credit(run_dir: str | Path, epoch: int = -1) -> list[torch.Tensor | Non
     if epoch_idx > (total_epochs - 1):
         raise IndexError(f"Selected epoch_idx {epoch_idx} is out of range of total number of epochs {total_epochs}.")
 
-    credit_data = results["history"]["epoch_credit_per_neuron"][epoch_idx]
+    credit_data = history_credit[epoch_idx]
 
     credit = [None for layer in credit_data]
     for index, layer in enumerate(credit_data):

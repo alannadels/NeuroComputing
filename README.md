@@ -78,9 +78,10 @@ NeuroComputing/
 │   │   ├── run_comparison.sh          full head-to-head pipeline (no backprop vs backprop)
 │   │   ├── compare_report.py          comparison.md / .json and plots from a run directory
 │   │   ├── latex_tables.py            LaTeX tables from comparison.json
+│   │   ├── exp_lib.sh, exp_report.py, exp_reproduce.sh     experiment batches and restore
 │   │   ├── run_ablation.sh, aggregate.py, beta_sweep.py   ablation grid and sweeps
 │   ├── tests/                         pytest suite (includes the no-backprop checks)
-│   └── data/, runs/                   datasets and run outputs (both git-ignored)
+│   └── data/, runs/, experiments/     datasets, run outputs, experiment batches (git-ignored)
 └── snn-surrogate-baseline/            snnTorch Tutorial 6 surrogate-gradient BPTT baseline
                                        (conv SNN); neuron-games imports its data loaders,
                                        seeding, energy meter, plots and kernel library
@@ -223,6 +224,12 @@ python scripts/latex_tables.py runs/<compare-dir>/comparison.json -o docs/experi
 Requires `\usepackage{booktabs,multirow,amsmath}`. The tables for the
 2026-10-21 comparison are in
 `docs/experiments/results_mnist_3seeds_2026-10-21.tex`.
+
+### Experiment batches
+
+Iterative experiments (batches of 10, each with a backprop control, every
+configuration and result recorded, any version restorable) are described in
+[`neuron-games/docs/EXPERIMENTS.md`](neuron-games/docs/EXPERIMENTS.md).
 
 ### Single runs
 

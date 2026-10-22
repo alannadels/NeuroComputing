@@ -111,7 +111,8 @@ def fit_temperature(counts: torch.Tensor, target: torch.Tensor) -> float:
 
 
 def temporal_metrics(counts_t: torch.Tensor, target: torch.Tensor) -> dict:
-    """counts_t: [N, T, C] cumulative output spike counts."""
+    """counts_t: [N, T, C] cumulative output evidence (spike counts, or summed
+    read-out membrane for a leaky read-out)."""
     preds_t = counts_t.argmax(dim=-1)                          # [N, T]
     N, T = preds_t.shape
     final = preds_t[:, -1]
@@ -136,12 +137,12 @@ def temporal_metrics(counts_t: torch.Tensor, target: torch.Tensor) -> dict:
         "decision_step": {"all": stats(decision), "correct": stats(decision[correct]),
                           "incorrect": stats(decision[~correct])},
         "fraction_decided_by_step": decided_by,
-        "no_output_spike_fraction": float(no_output),          # predicted class 0 by default
+        "no_output_spike_fraction": float(no_output),          # all-zero evidence -> class 0
     }
 
 
 def detailed_metrics(collected: dict, n_classes: int, val_collected: dict | None = None) -> dict:
-    counts_t, probs, target = collected["counts_t"].long(), collected["probs"], collected["targets"].long()
+    counts_t, probs, target = collected["counts_t"].double(), collected["probs"], collected["targets"].long()
     counts = counts_t[:, -1, :]
     pred = counts.argmax(dim=-1)
     out = {
@@ -151,7 +152,7 @@ def detailed_metrics(collected: dict, n_classes: int, val_collected: dict | None
         "temporal": temporal_metrics(counts_t, target),
     }
     if val_collected is not None:
-        tau = fit_temperature(val_collected["counts_t"][:, -1, :].long(),
+        tau = fit_temperature(val_collected["counts_t"][:, -1, :].double(),
                               val_collected["targets"].long())
         scaled = torch.softmax(counts.double() / tau, dim=1)
         out["calibration_temperature_scaled"] = {"temperature": tau, "fit_on": "validation",
@@ -165,7 +166,8 @@ def steps_sweep(net, loaders, cfg, device: torch.device, steps: list[int]) -> li
         cfg_t = dataclasses.replace(cfg, num_steps=T)
         m, timing = timed_inference(net, loaders["test"], cfg_t, device, warmup_loader=loaders["val"])
         out.append({"num_steps": T, "accuracy": m["accuracy"], "loss": m["loss"],
-                    "firing_rate": m["firing_rate"], **{f"inference_{k}": v for k, v in timing.items()
+                    "firing_rate": m["firing_rate"], "sops_per_image": m["sops"]["per_image"],
+                    **{f"inference_{k}": v for k, v in timing.items()
                                                         if k not in ("time_steps", "device")}})
     return out
 

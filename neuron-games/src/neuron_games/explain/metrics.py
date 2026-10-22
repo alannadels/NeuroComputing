@@ -25,7 +25,7 @@ def masked_accuracy(net, loader, cfg, device, masks: list[torch.Tensor | None]) 
         data = data.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         rec = net(encode(data, cfg.num_steps, cfg.encoding), masks=masks)
-        correct += int((spike_count_predictions(rec.out_spk) == targets).sum().item())
+        correct += int((spike_count_predictions(rec.out) == targets).sum().item())
         total += targets.numel()
 
     return correct / total if total > 0 else 0.0

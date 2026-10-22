@@ -33,3 +33,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Experiment batches: kept on the machine that runs them (see neuron-games/docs/EXPERIMENTS.md)
+neuron-games/experiments/
