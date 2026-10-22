@@ -104,6 +104,7 @@ class NGRunConfig:
     diversity_sigma: float = 1.0          # schoenberg bandwidth
     dpp_eps_scale: float = 1e-4           # jitter eps = dpp_eps_scale * mean(diag K)
     beta: float = 3e-3                    # picked by scripts/beta_sweep.py; see sweep notes
+    diversity_every: int = 1              # compute V on every k-th window only (scaled by k)
 
     # --- E: metabolic + barrier homeostasis (proposal §6) ---
     metabolic: str = "none"               # none | basic (eq. 15)
@@ -122,6 +123,11 @@ class NGRunConfig:
     barrier_t0: float = 1.0               # log-barrier extension: t = t0 * barrier_mu ** epoch
     barrier_mu: float = 1.5
     mu: float = 1e-4
+
+    # Homeostatic firing-rate floor (potential/rate_floor.py): penalty c_floor *
+    # sum relu(rate_floor - rate_i)^2 for hidden neurons; 0 disables it.
+    rate_floor: float = 0.0               # minimum firing rate, spikes per neuron per step
+    c_floor: float = 10.0
 
     # --- R: conventional weight regularizer ---
     lam: float = 0.0
@@ -191,7 +197,8 @@ class NGRunConfig:
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"
-                                             or self.barrier != "none" or self.credit != "none"):
+                                             or self.barrier != "none" or self.credit != "none"
+                                             or self.rate_floor > 0.0):
             raise ValueError("V / E / credit terms are only wired into the three_factor rule")
         if self.credit_modulates and self.credit == "none":
             raise ValueError("credit_modulates=True needs a credit method")

@@ -200,7 +200,8 @@ def reference_phi_cfg(cfg: NGRunConfig) -> NGRunConfig:
     (diversity, metabolic, barrier) with this run's coefficients."""
     p = CONDITION_PRESETS["ng_full"]
     return dataclasses.replace(cfg, learning_rule="three_factor", optimizer="sgd", bias=False,
-                               credit="none", credit_modulates=False,
+                               credit="none", credit_modulates=False, rate_floor=0.0,
+                               diversity_every=1,
                                diversity=p["diversity"], metabolic=p["metabolic"],
                                barrier=p["barrier"])
 

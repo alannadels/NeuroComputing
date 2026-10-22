@@ -165,3 +165,41 @@ def test_epoch_timing_split(tmp_path) -> None:
         assert len(h[key]) == 2 and all(x >= 0 for x in h[key])
     for tr, va, comb in zip(h["epoch_train_time_s"], h["epoch_val_time_s"], h["epoch_time_s"]):
         assert comb == pytest.approx(tr + va)
+
+
+def test_rate_floor_closed_form() -> None:
+    from neuron_games.potential.rate_floor import rate_floor_term, rate_floor_value
+    ctx = _ctx(_cfg(rate_floor=0.6, c_floor=1.0))              # high floor: some neurons below it
+    ref = autograd_signals(ctx, lambda s, u, w: rate_floor_value(s, ctx.hidden_layers, 0.6),
+                           wrt_mem=False, wrt_weights=False)
+    out = rate_floor_term(ctx)
+    _assert_signals_equal(out, ref)
+    assert out.signals[0].spike.min() < 0                      # pushes silent-ish neurons up
+
+
+def test_diversity_every_k_windows() -> None:
+    from neuron_games.state import GameState
+    cfg = _cfg(diversity="dpp_logdet", diversity_every=3)
+    ctx = _ctx(cfg)
+    ctx.state = GameState(n_layers=2)
+    full = evaluate_potential_for(_cfg(diversity="dpp_logdet"), ctx)
+    ctx.state.window = 3
+    on = evaluate_potential_for(cfg, ctx)
+    ctx.state.window = 4
+    off = evaluate_potential_for(cfg, ctx)
+    torch.testing.assert_close(on.signals[0].spike, 3.0 * full.signals[0].spike)
+    assert off.signals[0].spike is None and "V" not in off.components
+
+
+def evaluate_potential_for(cfg, ctx):
+    ctx.cfg = cfg
+    return P.evaluate_potential(ctx)
+
+
+@pytest.mark.parametrize("extra", [{"rate_floor": 0.02}, {"diversity_every": 4}])
+def test_new_options_make_no_autograd_calls(extra, tmp_path) -> None:
+    cfg = NGRunConfig.for_condition("tf_div_energy", n_hidden=16, num_steps=6, epochs=2, device="cpu",
+                                    readout="leaky", feedback="kolen_pollack", diag_batches=1, **extra)
+    with count_autograd_calls() as calls:
+        train(cfg, _synthetic_loaders(), torch.device("cpu"), tmp_path)
+    assert calls.calls == 0
