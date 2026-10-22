@@ -1,8 +1,8 @@
 """Controlled cost benchmark for the experiments of a batch.
 
 Usage (from neuron-games/):
-    python scripts/cost_benchmark.py experiments/batch_NN [--steps 100] [--repeats 5]
-        [--infer-batches 20] [--warmup 10]
+    python scripts/cost_benchmark.py experiments/batch_NN [--steps 200] [--repeats 5]
+        [--infer-batches 20] [--infer-passes 10] [--warmup 10]
 
 End-to-end training wall times vary by 10-15% between runs of the same model
 (GPU temperature, clocks, run order), which is larger than many real
@@ -18,7 +18,9 @@ same conditions instead:
 
 Training cost is one full training step of the model's own learning rule
 (forward + update; the BPTT model includes its backward pass). Inference cost
-is the forward pass with spike-count prediction on test batches.
+is the forward pass with spike-count prediction on test batches, repeated
+--infer-passes times so each measurement window lasts over a second: the GPU
+energy counter is too coarse for windows of ~0.1 s.
 
 Writes cost_benchmark.json and cost_benchmark.md in the batch directory.
 """
@@ -103,9 +105,10 @@ def _measure(fn, n, device, meter):
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("batch_dir", type=Path)
-    p.add_argument("--steps", type=int, default=100)
+    p.add_argument("--steps", type=int, default=200)
     p.add_argument("--repeats", type=int, default=5)
     p.add_argument("--infer-batches", type=int, default=20)
+    p.add_argument("--infer-passes", type=int, default=10)
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--device", default="cuda")
     args = p.parse_args(argv)
@@ -156,9 +159,12 @@ def main(argv=None) -> int:
             net.eval()
             for x, _ in test_batches[:2]:
                 _infer(cfg, net, x)
-            wall, e, mem = _measure(lambda i: _infer(cfg, net, test_batches[i][0]), len(test_batches), device, meter)
-            s["infer_ms_img"].append(1000 * wall / n_test_imgs)
-            s["infer_mj_img"].append(None if e is None else 1000 * e / n_test_imgs)
+            nb = len(test_batches)
+            wall, e, mem = _measure(lambda i: _infer(cfg, net, test_batches[i % nb][0]),
+                                    nb * args.infer_passes, device, meter)
+            n_inf = n_test_imgs * args.infer_passes
+            s["infer_ms_img"].append(1000 * wall / n_inf)
+            s["infer_mj_img"].append(None if e is None else 1000 * e / n_inf)
             s["infer_mem"].append(mem["allocated"])
             del step, net
             gc.collect()
@@ -171,7 +177,7 @@ def main(argv=None) -> int:
     out = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"), "steps": args.steps,
            "repeats": args.repeats, "batch_size": cfg0.batch_size,
            "train_images_per_step": n_train_imgs / max(args.steps, 1),
-           "test_images": n_test_imgs, "device": str(device),
+           "test_images": n_test_imgs, "infer_passes": args.infer_passes, "device": str(device),
            "gpu": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
            "summary": summary, "samples": samples}
     (args.batch_dir / "cost_benchmark.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
@@ -180,7 +186,8 @@ def main(argv=None) -> int:
         return "--" if pair[0] is None else f"{pair[0]:.{d}f} ± {pair[1]:.{d}f}"
     L = ["# Controlled cost benchmark\n",
          f"{args.repeats} interleaved repeats x {args.steps} training steps (batch {cfg0.batch_size}) and "
-         f"{n_test_imgs} test images per experiment, same preloaded data, order rotated each repeat. "
+         f"{n_test_imgs} test images x {args.infer_passes} passes per experiment, same preloaded data, "
+         f"order rotated each repeat. "
          f"Device: {out['gpu'] or device}. Mean ± std over repeats.\n",
          "| experiment | train ms/step | train mJ/step | peak train MiB | infer ms/img | infer mJ/img | peak infer MiB |",
          "|---|---|---|---|---|---|---|"]
