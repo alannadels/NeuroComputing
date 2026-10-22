@@ -111,10 +111,23 @@ FRONT_LABELS = ["accuracy", "energy: train/step", "energy: infer/img", "energy: 
                 "eff.: epochs to 95%", "explainability"]
 
 
+_BENCH_STD_KEY = {"bench_train_ms_step": "train_ms", "bench_train_mj_step": "train_mj",
+                  "bench_train_mem_mib": "train_mem", "bench_infer_ms_img": "infer_ms_img",
+                  "bench_infer_mj_img": "infer_mj_img"}
+
+
 def compare(m: dict, ref: dict) -> dict:
+    """win / loss / tie per metric. Benchmark metrics within one standard
+    deviation (of either run) are reported as 'tie (noise)'."""
     out = {}
     for key, better, _front in FRONTS:
         a, b = m.get(key), ref.get(key)
+        sk = _BENCH_STD_KEY.get(key)
+        if sk and a is not None and b is not None:
+            sd = max((m.get("bench_std") or {}).get(sk) or 0.0, (ref.get("bench_std") or {}).get(sk) or 0.0)
+            if abs(a - b) < sd:
+                out[key] = "tie (noise)"
+                continue
         if key == "epochs_to_95":                 # not reaching 95% counts as worst
             a = a if a is not None else 10 ** 9
             b = b if b is not None else 10 ** 9
@@ -186,7 +199,8 @@ def main(batch_dir: Path) -> int:
     L += ["", "Faithfulness margin = test accuracy after removing 64 random hidden neurons minus after "
           "removing the 64 top-credited ones (positive = credit is faithful).", "",
           "## Fronts vs reference\n",
-          "Each metric compared with the experiment's reference run (win / loss / tie).\n",
+          "Each metric compared with the experiment's reference run (win / loss / tie). Benchmark "
+          "metrics whose difference is smaller than one standard deviation are 'tie (noise)'.\n",
           "| ID | ref | " + " | ".join(FRONT_LABELS) + " |", "|" + "---|" * (len(FRONTS) + 1)]
     for e in exps:
         v = e["vs_reference"]
