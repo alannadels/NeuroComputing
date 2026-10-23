@@ -6,6 +6,7 @@
 #   batch_init 01 "short title"
 #   run_exp E01 three_factor "what it tests" --ref C01 -- --model three_factor
 #   ...
+#   run_stage 2a          # runs chosen automatically from the results so far
 #   batch_finish
 #
 # Guarantees, so any result can be traced back and rerun exactly:
@@ -25,6 +26,10 @@ EXP_EPOCHS="${EXP_EPOCHS:-50}"
 EXP_SEED="${EXP_SEED:-1}"
 EXP_DEVICE="${EXP_DEVICE:-cuda}"
 EXP_DATASET="${EXP_DATASET:-mnist}"
+# EXP_DRY_RUN=1: no tag, snapshot, tests or training; every run_exp only checks
+# that its configuration is valid (run_snn.py --mode validate). Used to check a
+# batch script before launching it.
+EXP_DRY_RUN="${EXP_DRY_RUN:-0}"
 
 _exp_die() { echo "[batch] ERROR: $*" >&2; exit 2; }
 
@@ -38,6 +43,12 @@ batch_init() {   # batch_init <NN> <title>
     BATCH_ID="$1"; BATCH_TITLE="$2"
     BATCH_DIR="$EXP_ROOT/batch_$BATCH_ID"
     PY="$(_exp_python)"
+    BATCH_N=0; BATCH_FAILED=()
+    if [ "$EXP_DRY_RUN" = "1" ]; then
+        cd "$EXP_NG_ROOT" || _exp_die "cannot cd to $EXP_NG_ROOT"
+        echo "[dry-run] batch $BATCH_ID: $BATCH_TITLE"
+        return 0
+    fi
     mkdir -p "$BATCH_DIR" || _exp_die "cannot create $BATCH_DIR"
     cd "$EXP_NG_ROOT" || _exp_die "cannot cd to $EXP_NG_ROOT"
 
@@ -104,6 +115,15 @@ run_exp() {   # run_exp <ID> <slug> <description> [--ref <ID>] -- <run_snn.py ar
     done
     [ "${1:-}" = "--" ] && shift
     local run_dir="$BATCH_DIR/${id}_${slug}"
+    if [ "$EXP_DRY_RUN" = "1" ]; then
+        BATCH_N=$((BATCH_N + 1))
+        local v
+        v=$("$PY" scripts/run_snn.py --mode validate --dataset "$EXP_DATASET" --device cpu \
+            --epochs "$EXP_EPOCHS" --seed "$EXP_SEED" "$@" 2>&1 | grep "^VALID" ) \
+            || { echo "[dry-run] INVALID $id: $*"; BATCH_FAILED+=("$id"); return 1; }
+        echo "[dry-run] $id ($slug, ref ${ref:-default}): ${v#VALID }"
+        return 0
+    fi
     [ -e "$run_dir/results.json" ] && { echo "[batch] $id already done, skipping"; return 0; }
     mkdir -p "$run_dir"
     local cmd=("$PY" -u scripts/run_snn.py --mode train --dataset "$EXP_DATASET" --device "$EXP_DEVICE"
@@ -152,6 +172,10 @@ PY
 }
 
 batch_finish() {
+    if [ "$EXP_DRY_RUN" = "1" ]; then
+        echo "[dry-run] $BATCH_N runs checked, ${#BATCH_FAILED[@]} invalid"
+        [ ${#BATCH_FAILED[@]} -eq 0 ]; return
+    fi
     echo
     echo "[batch $BATCH_ID] controlled cost benchmark"
     "$PY" scripts/cost_benchmark.py "$BATCH_DIR" --device "$EXP_DEVICE" > "$BATCH_DIR/cost_benchmark.log" 2>&1 \
@@ -164,4 +188,17 @@ batch_finish() {
         echo "[batch $BATCH_ID] failed:"; for f in "${BATCH_FAILED[@]}"; do echo "  - $f"; done
         return 1
     fi
+}
+
+run_stage() {   # run_stage <stage>: runs chosen by scripts/exp_select.py from the results so far
+    local stage="$1" lines
+    if [ "$EXP_DRY_RUN" = "1" ]; then
+        echo "[dry-run] stage $stage: selected at run time from results (not checked in a dry run)"
+        return 0
+    fi
+    echo
+    echo "[batch $BATCH_ID] selecting stage $stage"
+    lines="$("$PY" scripts/exp_select.py "$BATCH_DIR" "$stage")" \
+        || { echo "[batch] stage $stage selection failed"; return 1; }
+    eval "$lines"
 }

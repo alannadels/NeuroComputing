@@ -74,7 +74,8 @@ def _parse_set(items: list[str]) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Train/evaluate the no-backprop or the backprop SNN.")
-    p.add_argument("--mode", choices=["train", "eval"], default="train")
+    p.add_argument("--mode", choices=["train", "eval", "validate"], default="train",
+                   help="validate: build and check the configuration only, no training")
     p.add_argument("--model", choices=sorted(MODELS), default="ng_snn")
     p.add_argument("--dataset", default="mnist", help="mnist | fashion_mnist")
     p.add_argument("--device", default="cuda", help="cuda | mps | cpu (never falls back)")
@@ -143,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
             overrides[key] = val
     condition = MODELS[args.model]
     cfg = NGRunConfig.for_condition(condition, **overrides)
+    if args.mode == "validate":
+        keys = ("learning_rule", "readout", "feedback", "feedback_decay", "diversity", "metabolic",
+                "barrier", "mu", "lr", "momentum", "n_hidden", "num_steps", "threshold_adapt",
+                "rate_floor", "credit", "credit_modulates", "seed", "epochs")
+        print("VALID " + json.dumps({k: getattr(cfg, k) for k in keys}))
+        return 0
     if not cfg.run_dir:
         cfg.run_dir = str(ROOT / "runs" / f"{args.model}-{cfg.dataset}" /
                           f"seed{cfg.seed}-{time.strftime('%Y%m%d-%H%M%S')}")

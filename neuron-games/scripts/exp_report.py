@@ -28,6 +28,7 @@ end-to-end run numbers are kept in the results table for reference.
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -138,6 +139,33 @@ def compare(m: dict, ref: dict) -> dict:
     return out
 
 
+def _settings_key(overrides: list[str]) -> str:
+    """The run's settings without its seed, as a stable string."""
+    toks, out, i = list(overrides), [], 0
+    while i < len(toks):
+        if toks[i] == "--seed":
+            i += 2
+            continue
+        out.append(toks[i]); i += 1
+    model = out[out.index("--model") + 1] if "--model" in out else "?"
+    sets = sorted(out[j + 1] for j, tok in enumerate(out) if tok == "--set")
+    collapsed = {}
+    for s in sets:                            # last value per setting wins, like argparse
+        k, v = s.split("=", 1); collapsed[k] = v
+    rest = [tok for j, tok in enumerate(out) if tok not in ("--model", "--set")
+            and (j == 0 or out[j - 1] not in ("--model", "--set"))]
+    return " ".join([model] + [f"{k}={v}" for k, v in sorted(collapsed.items())] + rest)
+
+
+def _mean_std(xs):
+    xs = [x for x in xs if x is not None]
+    if not xs:
+        return None, None
+    if len(xs) == 1:
+        return xs[0], 0.0
+    return statistics.mean(xs), statistics.stdev(xs)
+
+
 def _f(x, d=4, scale=1.0):
     if x is None:
         return "--"
@@ -196,6 +224,28 @@ def main(batch_dir: Path) -> int:
                  f"{_f(m['sops_per_image'], 0)} | {_f(m['sops_network_per_image'], 0)} | {_f(m['hidden_rate'], 3)} | {_f(m['epochs_to_95'])} | "
                  f"{_f(m['faith_margin_shapley'])} | {_f(m['faith_margin_taylor'])} | "
                  f"{_f(m['stability_shapley'], 3)} | {_f(m['stability_taylor'], 3)} | {_f(m['autograd_calls'])} |")
+    # Aggregate runs that share settings (seeds of the same configuration).
+    groups: dict[str, list] = {}
+    for e in exps:
+        if e["metrics"]:
+            groups.setdefault(_settings_key(e["overrides"]), []).append(e)
+    multi = {k: v for k, v in groups.items() if len(v) > 1}
+    if multi:
+        L += ["", "## By settings (mean ± std over seeds)\n",
+              "Configurations run on more than one seed, ordered by mean validation accuracy.\n",
+              "| runs | n | val acc | test acc | network SOPs/img | faith. margin (best) | settings |",
+              "|---|---|---|---|---|---|---|"]
+        rows = []
+        for k, v in multi.items():
+            ms = {key: _mean_std([e["metrics"][key] for e in v])
+                  for key in ("best_val_acc", "test_acc", "sops_network_per_image", "faith_margin_best")}
+            rows.append((ms["best_val_acc"][0], v, ms, k))
+        for _, v, ms, k in sorted(rows, key=lambda r: -r[0]):
+            def ps(pair, d):
+                return "--" if pair[0] is None else f"{pair[0]:.{d}f} ± {pair[1]:.{d}f}"
+            L.append(f"| {', '.join(e['id'] for e in v)} | {len(v)} | {ps(ms['best_val_acc'], 4)} | "
+                     f"{ps(ms['test_acc'], 4)} | {ps(ms['sops_network_per_image'], 0)} | "
+                     f"{ps(ms['faith_margin_best'], 3)} | `{k}` |")
     L += ["", "Faithfulness margin = test accuracy after removing 64 random hidden neurons minus after "
           "removing the 64 top-credited ones (positive = credit is faithful).", "",
           "## Fronts vs reference\n",
