@@ -97,7 +97,7 @@ with the full metric suite and a report.
 ### 1. Requirements
 
 - Python 3.12 and an NVIDIA GPU with CUDA 12.8 support. Any recent NVIDIA GPU
-  works; the reported results were obtained on a single NVIDIA RTX 5090. CPU and
+  works. CPU and
   Apple Silicon also work for small runs.
 - About 1 GB free disk for MNIST and run outputs.
 - Internet access on the first run (MNIST downloads automatically to
@@ -153,8 +153,8 @@ The script:
 
 It exits non-zero if any run fails, and the report fails if the no-backprop
 model made a single autograd call during training. Expect about 6.5 minutes
-per model per seed on the RTX 5090 the results were obtained on (about 40
-minutes for 3 seeds); slower GPUs take proportionally longer.
+per model per seed on a recent high-end GPU (about 40 minutes for 3 seeds);
+slower GPUs take proportionally longer.
 
 Options: `--dataset mnist|fashion_mnist`, `--epochs N`, `--seeds "..."`,
 `--models "bp_snn ng_snn"` (any two of `bp_snn`, `ng_snn`, `three_factor`,
@@ -163,14 +163,8 @@ Options: `--dataset mnist|fashion_mnist`, `--epochs N`, `--seeds "..."`,
 after `--` goes to every training run, e.g.
 `./scripts/run_comparison.sh -- --set beta=1e-3 --set lr_patience=3`.
 
-On a shared GPU machine, run it inside `tmux` (or a job queue) so it survives
-a disconnect:
-
-```bash
-tmux new -s compare
-./scripts/run_comparison.sh --seeds "1 2 3"
-# detach: Ctrl-b then d      reattach: tmux attach -t compare
-```
+On a remote or shared machine, run it in a persistent terminal session or a job
+queue so it survives a disconnect.
 
 Seeds run in separate invocations can be combined into one report, as long as
 they used the same commit and settings (check `env/run_info.txt`):
@@ -218,7 +212,7 @@ Metrics, identical for every model:
 
 ```bash
 python scripts/latex_tables.py runs/<compare-dir>/comparison.json -o docs/experiments/<name>.tex \
-    --gpu "one NVIDIA RTX 5090"      # hardware named in the cost-table caption
+    --gpu "<hardware>"      # hardware named in the cost-table caption
 ```
 
 Requires `\usepackage{booktabs,multirow,amsmath}`. The tables for the
@@ -229,7 +223,8 @@ Requires `\usepackage{booktabs,multirow,amsmath}`. The tables for the
 
 Iterative experiments (batches of 10, each with a backprop control, every
 configuration and result recorded, any version restorable) are described in
-[`neuron-games/docs/EXPERIMENTS.md`](neuron-games/docs/EXPERIMENTS.md).
+[`neuron-games/docs/EXPERIMENTS.md`](neuron-games/docs/EXPERIMENTS.md). What has been tried so far,
+what worked and what did not: [`neuron-games/docs/EXPERIMENT_SUMMARY.md`](neuron-games/docs/EXPERIMENT_SUMMARY.md).
 
 ### Single runs
 
@@ -246,7 +241,7 @@ back silently.
 
 ## Results so far
 
-MNIST, 50 epochs, 3 seeds, obtained on a single NVIDIA RTX 5090 (full tables:
+MNIST, 50 epochs, 3 seeds, obtained on a single GPU (full tables:
 `neuron-games/docs/experiments/results_mnist_3seeds_2026-10-21.tex`):
 
 | | backprop SNN | no-backprop SNN (Neuron Games) |

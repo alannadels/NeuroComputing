@@ -3,7 +3,7 @@
 Usage (from neuron-games/):
     python scripts/latex_tables.py runs/compare-<...>/comparison.json [-o results.tex]
         [--ours ng_snn] [--baseline bp_snn] [--dataset MNIST] [--epochs 50]
-        [--gpu "one NVIDIA RTX 5090"]
+        [--gpu "<hardware>"]
 
 Writes a standalone-includable .tex fragment (needs \\usepackage{booktabs},
 \\usepackage{multirow} and \\usepackage{amsmath} in the preamble) with:
@@ -76,7 +76,7 @@ def main(argv=None) -> int:
     p.add_argument("--dataset", default="MNIST")
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--gpu", default="a single NVIDIA GPU",
-                   help='hardware named in the cost caption, e.g. "one NVIDIA RTX 5090"')
+                   help='hardware named in the cost caption, e.g. "one GPU"')
     args = p.parse_args(argv)
 
     d = json.loads(args.comparison_json.read_text())

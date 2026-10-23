@@ -53,10 +53,10 @@ neuron-games/experiments/
 ```bash
 source <your-venv>/bin/activate
 cd neuron-games
-tmux new -s batchNN
 experiments/batch_NN/run_batch_NN.sh
 ```
 
+Run it in a persistent terminal session or a job queue on remote machines.
 A batch resumes where it stopped if it is restarted (finished experiments,
 those with a `results.json`, are skipped).
 

@@ -35,7 +35,7 @@ Autograd calls in training (per seed) & 21{,}450 & 0 \\
 \begin{table}[t]
 \centering
 \small
-\caption{Training and inference cost, obtained on one NVIDIA RTX 5090. MNIST, 784--128--10 LIF network, $T=25$ rate-coded steps, 50 epochs, mean $\pm$ std over 3 seeds; test set evaluated once on the best-validation checkpoint. Times exclude validation unless stated; inference is timed after warm-up over the 10{,}000 test images (batch 256). $^a$GPU-only NVML reading over the whole training loop (includes validation). $^b$Spikes per neuron per time step (lower is sparser). Bold: better mean per row. $^\dagger$Difference smaller than one standard deviation.}
+\caption{Training and inference cost, obtained on a single GPU. MNIST, 784--128--10 LIF network, $T=25$ rate-coded steps, 50 epochs, mean $\pm$ std over 3 seeds; test set evaluated once on the best-validation checkpoint. Times exclude validation unless stated; inference is timed after warm-up over the 10{,}000 test images (batch 256). $^a$GPU-only NVML reading over the whole training loop (includes validation). $^b$Spikes per neuron per time step (lower is sparser). Bold: better mean per row. $^\dagger$Difference smaller than one standard deviation.}
 \label{tab:ng-cost}
 \begin{tabular}{lcc}
 \toprule

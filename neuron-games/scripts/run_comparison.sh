@@ -9,7 +9,7 @@
 #                             [--skip-tests] [--skip-explain]
 #                             [-- extra run_snn.py args, e.g. --set beta=1e-3]
 #
-# On a shared GPU machine, run it inside tmux (or a job queue) so it survives a
+# On a shared GPU machine, run it in a persistent terminal session (or a job queue) so it survives a
 # disconnect.
 #
 # Steps:
