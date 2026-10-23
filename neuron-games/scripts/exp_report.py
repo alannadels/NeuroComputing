@@ -148,7 +148,7 @@ def _settings_key(overrides: list[str]) -> str:
             continue
         out.append(toks[i]); i += 1
     model = out[out.index("--model") + 1] if "--model" in out else "?"
-    sets = sorted(out[j + 1] for j, tok in enumerate(out) if tok == "--set")
+    sets = [out[j + 1] for j, tok in enumerate(out) if tok == "--set"]
     collapsed = {}
     for s in sets:                            # last value per setting wins, like argparse
         k, v = s.split("=", 1); collapsed[k] = v
