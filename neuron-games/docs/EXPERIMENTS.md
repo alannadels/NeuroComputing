@@ -50,6 +50,10 @@ neuron-games/experiments/
 
 ## Running a batch
 
+Create a new batch from the template with
+`scripts/new_batch.sh <ID> "<title>"` (see the protocol in
+[`EXPERIMENT_SUMMARY.md`](EXPERIMENT_SUMMARY.md)), then:
+
 ```bash
 source <your-venv>/bin/activate
 cd neuron-games

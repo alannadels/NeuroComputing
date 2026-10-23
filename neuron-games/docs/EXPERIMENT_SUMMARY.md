@@ -128,6 +128,91 @@ neurons).
    instead of 64 so the test is meaningful at 1024 hidden.
 6. **Other datasets.** Nothing has been run beyond MNIST yet.
 
+## Experiment protocol
+
+Every result above was produced and recorded the same way. Please follow it
+for new experiments so results stay comparable and every number can be traced
+back to the exact code and command that produced it. Full reference:
+[`EXPERIMENTS.md`](EXPERIMENTS.md).
+
+### Workflow per batch
+
+```bash
+cd neuron-games
+scripts/new_batch.sh jh01 "Short title"      # your initials + number, never reuse an ID
+# 1. write experiments/batch_jh01/PLAN.md       (before running: why, hypotheses, decision rule)
+# 2. edit  experiments/batch_jh01/run_batch.sh  (one run_exp line per experiment)
+# 3. commit your code (the batch refuses to start on uncommitted changes)
+EXP_DRY_RUN=1 experiments/batch_jh01/run_batch.sh   # validates every configuration, no training
+experiments/batch_jh01/run_batch.sh                 # the batch itself
+# 4. write the analysis into experiments/EXPERIMENT_LOG.md (format below)
+```
+
+The template (`scripts/batch_template/`) starts from the current best
+configuration with 3-seed backprop and base controls. `run_batch.sh` uses
+`scripts/exp_lib.sh`, which records everything automatically:
+
+| recorded | where |
+|---|---|
+| exact code: refuses uncommitted code, tags the commit `exp/batch-<ID>`, stores a source snapshot | `batch_<ID>/env/source_<commit>.tar.gz` |
+| environment (Python and package versions, device) and the test-suite result; the batch stops if tests fail | `batch_<ID>/env/` |
+| per experiment: ID, description, reference, commit, exact command, overrides, exit status, timings | `<ID>_<slug>/experiment.json` |
+| per experiment: fully resolved settings, all metrics for every model, credit / explainability results, checkpoints, plots, training log | `<ID>_<slug>/` |
+| no-backprop audit: a three-factor run aborts on any autograd call | `results.json` (`autograd calls`) |
+| controlled cost benchmark of every trained model (same data, interleaved repeats) | `batch_<ID>/cost_benchmark.md` |
+| report: what ran, all results, every front vs its reference, per-settings means over seeds | `batch_<ID>/BATCH_REPORT.md`, `batch_results.json` |
+| one registry entry per experiment with its restore command | `experiments/VERSIONS.md` |
+| full console log | `batch_<ID>/batch.log` |
+
+Rerun any experiment exactly (same commit, command and seed):
+`scripts/exp_reproduce.sh experiments/batch_<ID>/<ID>_<slug>`.
+
+### Rules
+
+1. **Plan first.** `PLAN.md` is written before the batch runs: the reason for
+   each experiment, its hypothesis, and how the outcome decides the next step.
+2. **One change per experiment**, against a stated base. Never edit or rerun
+   an old experiment under the same ID; a new setting is a new ID.
+3. **Controls in every batch.** A backprop control (`C01`) on the same commit.
+   A change both models share (width, T, read-out, batch size, dataset) gets
+   its own backprop run, passed as `--ref`.
+4. **Seeds.** Single runs are screening only (noise ~0.3 pt). Confirm a change
+   on seeds 2 and 3 before adopting it; report mean +- std.
+5. **Select by validation accuracy, never test.** Test accuracy is reported,
+   not used for decisions.
+6. **Every metric for every model**, unless genuinely incompatible.
+7. **No backprop in our method.** Do not bypass the autograd guard; a run with
+   autograd calls is invalid.
+8. **Append, never edit.** `EXPERIMENT_LOG.md` and `VERSIONS.md` only grow.
+
+### Analysis format (`EXPERIMENT_LOG.md`)
+
+`batch_finish` appends a stub for the batch (commit, tag, report path,
+"analysis: PENDING"). Replace the PENDING line with:
+
+```markdown
+- analysis (<date>):
+
+### Results (dataset, epochs, seeds)
+<table: ID | change | test acc | network SOPs/img | faithfulness margin |
+ train ms/step | train mJ/step; costs from the cost benchmark>
+
+### Findings
+1. <numbered, one claim each, with numbers, and with the likely cause when
+   something fails or surprises>
+
+### Decisions for the next batch
+- <new base, and what to test next and why>
+```
+
+### Sharing results with the team
+
+The `experiments/` folder stays on the machine that ran it (git-ignored: large
+outputs and checkpoints). When a batch changes what is known, update this
+summary (the results table, "What worked", "What did not work", "Open
+problems") on the `experiments` branch, so it remains the single place to check
+before planning new experiments.
+
 ## Notes for interpreting results
 
 - Kolen-Pollack is local (the feedback matrix receives the output layer's own
