@@ -171,6 +171,13 @@ class NGRunConfig:
     batch_size: int = 128
     max_train_batches: int = 0            # >0: stop each epoch after this many batches (smoke runs)
     progress: bool = False                # draw an in-place per-batch progress bar on stderr
+    # When True (default), the per-step metrics acc / rates / grad_norms /
+    # update_norms are stacked into one tensor and transferred to host with a
+    # single .cpu() call instead of 2 + 3*n_layers separate float() calls. Pure
+    # cost refactor: identical values, one host↔device sync instead of many.
+    # Set to False to reproduce the pre-batch-db03 cost baseline. See
+    # experiments/batch_db03/PLAN.md.
+    metric_sync_batched: bool = True
 
     # --- Evaluation / reproducibility (same meaning as neuron_baseline.Config) ---
     val_size: int = 5000
