@@ -30,6 +30,11 @@ def _now_stamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
 
 
+def _arch_str(cfg) -> str:
+    hidden = tuple(getattr(cfg, "hidden_sizes", ()) or ()) or (cfg.n_hidden,)
+    return "-".join(str(x) for x in (cfg.n_in, *hidden, cfg.n_out))
+
+
 def resolve_device(name: str) -> torch.device:
     """Refuse to fall back silently: an unavailable requested device is an error."""
     if name.startswith("cuda") and not torch.cuda.is_available():
@@ -58,7 +63,7 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
     if verbose:
         print(f"[cfg] condition={cfg.condition} (row {cfg.row}) run_dir={run_dir}")
         print(f"[cfg] device={device} torch={cfg.fingerprint.get('torch')} "
-              f"net={cfg.n_in}-{cfg.n_hidden}-{cfg.n_out} T={cfg.num_steps} "
+              f"net={_arch_str(cfg)} T={cfg.num_steps} "
               f"encoding={cfg.encoding} loss={cfg.task_loss} dataset={cfg.dataset} "
               f"rule={cfg.learning_rule}")
     cfg.save(run_dir / "config.json")
@@ -139,7 +144,7 @@ def run_training(cfg: NGRunConfig, run_dir: Path | None = None, verbose: bool = 
                           "metabolic": cfg.metabolic, "barrier": cfg.barrier,
                           "credit": cfg.credit, "credit_modulates": cfg.credit_modulates,
                           "beta": cfg.beta, "mu": cfg.mu, "lam": cfg.lam},
-            "arch": f"fc-{cfg.n_in}-{cfg.n_hidden}-{cfg.n_out}",
+            "arch": f"fc-{_arch_str(cfg)}",
             "best_epoch": ckpt["epoch"],
             "lr_schedule": {"kind": cfg.lr_schedule, "factor": cfg.lr_factor,
                             "patience": cfg.lr_patience, "min_lr": cfg.lr * cfg.lr_min_factor,
