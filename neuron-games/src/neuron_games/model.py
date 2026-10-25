@@ -146,22 +146,41 @@ class SNNRecord:
 
 
 class FCSNN(nn.Module):
-    """n_in -> n_hidden -> n_out, LIF at both the hidden and output layer."""
+    """n_in -> hidden_sizes[0] -> ... -> hidden_sizes[-1] -> n_out, LIF everywhere.
+
+    Default is one hidden layer of size `n_hidden` (unchanged for every existing
+    caller). Pass `hidden_sizes=(h1, h2, ...)` for a deeper network: it ignores
+    `n_hidden` and builds LIFLayers along `[n_in, h1, h2, ..., n_out]`. Every
+    hidden layer gets adaptive_threshold when requested; only the output layer
+    switches to a leaky integrator when `readout="leaky"`.
+    """
 
     def __init__(self, n_in: int = 784, n_hidden: int = 128, n_out: int = 10,
                  alpha: float = 0.905, threshold: float = 1.0,
                  surrogate_slope: float = 25.0, bias: bool = False, readout: str = "spike",
-                 adaptive_threshold: bool = False):
+                 adaptive_threshold: bool = False,
+                 hidden_sizes: tuple[int, ...] = ()):
         super().__init__()
         if readout not in ("spike", "leaky"):
             raise ValueError(f"unknown readout {readout!r}")
+        hidden = tuple(hidden_sizes) if hidden_sizes else (n_hidden,)
+        if any(h <= 0 for h in hidden):
+            raise ValueError(f"hidden sizes must be positive, got {hidden}")
         kw = dict(alpha=alpha, threshold=threshold,
                   surrogate_slope=surrogate_slope, bias=bias)
         self.readout = readout
-        self.layers = nn.ModuleList([
-            LIFLayer(n_in, n_hidden, adaptive_threshold=adaptive_threshold, **kw),
-            LIFLayer(n_hidden, n_out, spiking=(readout == "spike"), **kw),
-        ])
+        self.hidden_sizes = hidden
+        sizes = [n_in, *hidden, n_out]
+        layers: list[LIFLayer] = []
+        for i in range(len(sizes) - 1):
+            is_output = i == len(sizes) - 2
+            layers.append(LIFLayer(
+                sizes[i], sizes[i + 1],
+                adaptive_threshold=(adaptive_threshold and not is_output),
+                spiking=(not is_output) or (readout == "spike"),
+                **kw,
+            ))
+        self.layers = nn.ModuleList(layers)
 
     @property
     def weights(self) -> list[torch.Tensor]:
@@ -236,8 +255,10 @@ class FCSNN(nn.Module):
 
 
 def build_net(cfg) -> FCSNN:
+    hidden_sizes = tuple(getattr(cfg, "hidden_sizes", ()) or ())
     return FCSNN(n_in=cfg.n_in, n_hidden=cfg.n_hidden, n_out=cfg.n_out,
                  alpha=cfg.alpha, threshold=cfg.threshold,
                  surrogate_slope=cfg.surrogate_slope, bias=cfg.bias,
                  readout=getattr(cfg, "readout", "spike"),
-                 adaptive_threshold=getattr(cfg, "threshold_adapt", False))
+                 adaptive_threshold=getattr(cfg, "threshold_adapt", False),
+                 hidden_sizes=hidden_sizes)

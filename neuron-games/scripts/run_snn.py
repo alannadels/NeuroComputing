@@ -66,6 +66,10 @@ def _parse_set(items: list[str]) -> dict:
             val = int(raw)
         elif isinstance(default, float):
             val = float(raw)
+        elif isinstance(default, tuple):
+            # Comma-separated ints, e.g. --set hidden_sizes=128,128.
+            parts = [p for p in raw.split(",") if p]
+            val = tuple(int(p) for p in parts)
         else:
             val = raw
         out[key] = val

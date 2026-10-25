@@ -74,6 +74,11 @@ class NGRunConfig:
     n_in: int = 784
     n_hidden: int = 128
     n_out: int = 10
+    # Optional multi-hidden-layer override. Empty tuple (default) means one hidden
+    # layer of size n_hidden, so every existing config and test keeps the same
+    # 784-n_hidden-n_out network. A non-empty tuple like (128, 128) builds a
+    # 784-128-128-n_out network and ignores n_hidden. See model.layer_hidden_sizes().
+    hidden_sizes: tuple[int, ...] = ()
     alpha: float = math.exp(-1.0 / 10.0)  # membrane decay, tau_m = 10 steps
     threshold: float = 1.0
     surrogate_slope: float = 25.0         # fast-sigmoid k
@@ -214,6 +219,17 @@ class NGRunConfig:
             raise ValueError("plasticity_signature diversity assumes a fixed threshold")
         if self.credit_modulates and self.credit == "none":
             raise ValueError("credit_modulates=True needs a credit method")
+        # Normalize and validate hidden_sizes. JSON round-trip reads it back as a
+        # list, so coerce to tuple[int, ...] and reject non-positive sizes.
+        if self.hidden_sizes:
+            try:
+                self.hidden_sizes = tuple(int(h) for h in self.hidden_sizes)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"hidden_sizes must be a sequence of ints, got {self.hidden_sizes!r}") from exc
+            if any(h <= 0 for h in self.hidden_sizes):
+                raise ValueError(f"hidden_sizes entries must be positive, got {self.hidden_sizes!r}")
+        else:
+            self.hidden_sizes = ()
 
     @classmethod
     def for_condition(cls, condition: str, **overrides: Any) -> "NGRunConfig":
