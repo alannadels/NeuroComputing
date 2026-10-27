@@ -194,10 +194,8 @@ class FCSNN(nn.Module):
         spk: list[list[torch.Tensor]] = [[] for _ in self.layers]
         mem: list[list[torch.Tensor]] = [[] for _ in self.layers]
         fan_in = [layer.fc.in_features for layer in self.layers]
-        n_out = [layer.fc.out_features for layer in self.layers]
         if record_traces:
             eps_buf = [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in]
-            h_buf = [torch.empty(T, B, n, device=dev, dtype=dt) for n in n_out]
         if record_inputs:
             inp_buf = [None] + [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in[1:]]
 
@@ -218,8 +216,6 @@ class FCSNN(nn.Module):
                         eps_buf[l][0].copy_(x_d)
                     else:
                         torch.add(x_d, eps_buf[l][t - 1], alpha=layer.alpha, out=eps_buf[l][t])
-                    h_buf[l][t] = fast_sigmoid_grad(u.detach() - layer.thr,
-                                                    layer.surrogate_slope)
                 if record_inputs and l > 0:
                     inp_buf[l][t] = inp.detach()
                 states[l] = (u, s)
@@ -232,7 +228,11 @@ class FCSNN(nn.Module):
         if retain_spike_grads:
             rec.hidden_spike_steps = hidden_steps
         if record_traces:
-            rec.eps, rec.h = eps_buf, h_buf
+            # h depends only on u[t], so it is computed for the whole window at
+            # once (same values as per step; far fewer kernel launches).
+            rec.eps = eps_buf
+            rec.h = [fast_sigmoid_grad(m.detach() - layer.thr, layer.surrogate_slope)
+                     for m, layer in zip(rec.mem, self.layers)]
         if record_inputs:
             rec.inp = [x_seq] + inp_buf[1:]      # layer 0's input is x_seq itself (no copy)
         return rec

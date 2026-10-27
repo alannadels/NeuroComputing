@@ -11,7 +11,8 @@ same conditions instead:
 
 - each experiment's trained model (checkpoints/best.pt) and configuration;
 - the same training batches for every experiment, preloaded on the GPU (no
-  data-loader time), the same number of steps;
+  data-loader time), the same number of steps; each experiment uses its own
+  batch size (experiments with the same batch size see identical batches);
 - experiments interleaved round-robin, with the order rotated every repeat so
   slow drifts (heating, clocks) affect all of them equally;
 - per repeat: synchronized wall time, GPU energy (NVML) and peak memory.
@@ -126,23 +127,29 @@ def main(argv=None) -> int:
     torch.backends.cudnn.benchmark = False
     meter = EnergyMeter(device_index=0)
 
-    # Same data for every experiment, preloaded on the device.
+    # Same data for every experiment, preloaded on the device: one set of
+    # training batches per batch size in use, one shared set of test batches.
     cfg0 = NGRunConfig.load(exps[0] / "config.json")
     cfg0.device = str(device)
-    loaders = loaders_for(cfg0, pin_memory=False)
-    train_batches, test_batches = [], []
-    for i, (x, y) in enumerate(loaders["train"]):
-        if i >= args.steps + args.warmup:
-            break
-        train_batches.append((x.to(device), y.to(device)))
-    for i, (x, y) in enumerate(loaders["test"]):
+    batch_of = {d.name: NGRunConfig.load(d / "config.json").batch_size for d in exps}
+    train_sets = {}
+    for bs in sorted(set(batch_of.values())):
+        c = NGRunConfig.load(exps[0] / "config.json")
+        c.device, c.batch_size = str(device), bs
+        tb = []
+        for i, (x, y) in enumerate(loaders_for(c, pin_memory=False)["train"]):
+            if i >= args.steps + args.warmup:
+                break
+            tb.append((x.to(device), y.to(device)))
+        train_sets[bs] = tb
+    test_batches = []
+    for i, (x, y) in enumerate(loaders_for(cfg0, pin_memory=False)["test"]):
         if i >= args.infer_batches:
             break
         test_batches.append((x.to(device), y.to(device)))
-    n_train_imgs = sum(int(y.numel()) for _, y in train_batches[args.warmup:])
     n_test_imgs = sum(int(y.numel()) for _, y in test_batches)
 
-    samples = {d.name: {"train_ms": [], "train_mj": [], "train_mem": [], "train_mem_inc": [],
+    samples = {d.name: {"train_ms": [], "train_us_img": [], "train_mj": [], "train_mem": [], "train_mem_inc": [],
                         "infer_ms_img": [], "infer_mj_img": [], "infer_mem": []} for d in exps}
     print(f"[bench] {len(exps)} experiments x {args.repeats} repeats, {args.steps} training steps "
           f"+ {len(test_batches)} test batches each")
@@ -152,11 +159,13 @@ def main(argv=None) -> int:
             seed_everything(1000 + r)
             cfg, net = _load(d, device)
             step = _train_stepper(cfg, net, device)
+            train_batches = train_sets[batch_of[d.name]]
             for i in range(args.warmup):
                 step(*train_batches[i])
             wall, e, mem = _measure(lambda i: step(*train_batches[args.warmup + i]), args.steps, device, meter)
             s = samples[d.name]
             s["train_ms"].append(1000 * wall / args.steps)
+            s["train_us_img"].append(1e6 * wall / (args.steps * batch_of[d.name]))
             s["train_mj"].append(None if e is None else 1000 * e / args.steps)
             s["train_mem"].append(mem["allocated"])
             s["train_mem_inc"].append(mem["increase"])
@@ -178,9 +187,10 @@ def main(argv=None) -> int:
     meter.shutdown()
 
     summary = {name: {k: _ms(v) for k, v in s.items()} for name, s in samples.items()}
+    for name in summary:
+        summary[name]["batch_size"] = batch_of[name]
     out = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"), "steps": args.steps,
-           "repeats": args.repeats, "batch_size": cfg0.batch_size,
-           "train_images_per_step": n_train_imgs / max(args.steps, 1),
+           "repeats": args.repeats, "batch_sizes": batch_of,
            "test_images": n_test_imgs, "infer_passes": args.infer_passes, "device": str(device),
            "gpu": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
            "summary": summary, "samples": samples}
@@ -189,14 +199,16 @@ def main(argv=None) -> int:
     def f(pair, d=2):
         return "--" if pair[0] is None else f"{pair[0]:.{d}f} ± {pair[1]:.{d}f}"
     L = ["# Controlled cost benchmark\n",
-         f"{args.repeats} interleaved repeats x {args.steps} training steps (batch {cfg0.batch_size}) and "
+         f"{args.repeats} interleaved repeats x {args.steps} training steps (each experiment at its own "
+         f"batch size) and "
          f"{n_test_imgs} test images x {args.infer_passes} passes per experiment, same preloaded data, "
          f"order rotated each repeat. "
          f"Device: {out['gpu'] or device}. Mean ± std over repeats.\n",
-         "| experiment | train ms/step | train mJ/step | peak train MiB | infer ms/img | infer mJ/img | peak infer MiB |",
-         "|---|---|---|---|---|---|---|"]
+         "| experiment | batch | train ms/step | train us/img | train mJ/step | peak train MiB | infer ms/img | infer mJ/img | peak infer MiB |",
+         "|---|---|---|---|---|---|---|---|---|"]
     for name, s in summary.items():
-        L.append(f"| {name} | {f(s['train_ms'])} | {f(s['train_mj'], 1)} | {f(s['train_mem'], 1)} | "
+        L.append(f"| {name} | {s['batch_size']} | {f(s['train_ms'])} | {f(s['train_us_img'], 1)} | "
+                 f"{f(s['train_mj'], 1)} | {f(s['train_mem'], 1)} | "
                  f"{f(s['infer_ms_img'], 4)} | {f(s['infer_mj_img'], 3)} | {f(s['infer_mem'], 1)} |")
     (args.batch_dir / "cost_benchmark.md").write_text("\n".join(L) + "\n", encoding="utf-8")
     print("\n".join(L))

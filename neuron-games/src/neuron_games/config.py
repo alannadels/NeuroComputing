@@ -95,6 +95,10 @@ class NGRunConfig:
                                           # update as the output weights, both decay by
                                           # feedback_decay per step, so B -> W_out (local, no backprop)
     feedback_decay: float = 1e-4          # kolen_pollack only: per-step decay of B and W_out
+    feedback_path: str = "direct"         # several hidden layers: direct (every hidden layer gets the
+                                          # output error through its own B) | layerwise (layer l gets
+                                          # layer l+1's signal through B_l, which tracks W_{l+1});
+                                          # identical with one hidden layer
     feedback_seed_offset: int = 7919      # B is drawn from seed + offset, independent of W init
 
     # --- V: diversity (proposal §5) ---
@@ -205,6 +209,7 @@ class NGRunConfig:
         _check("lr_schedule", self.lr_schedule, ("plateau", "none"))
         _check("readout", self.readout, ("spike", "leaky"))
         _check("feedback", self.feedback, ("random", "kolen_pollack"))
+        _check("feedback_path", self.feedback_path, ("direct", "layerwise"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none"

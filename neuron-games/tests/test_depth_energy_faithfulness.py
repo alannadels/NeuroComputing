@@ -161,3 +161,54 @@ def test_fraction_margin_reads_the_25_percent_point() -> None:
     assert exp_report._margin_frac(faith) == pytest.approx(0.2)
     assert exp_report._margin_frac({"k": [64], "top": [0.5], "random_mean": [0.6]}) is None
     assert exp_report._margin_frac(None) is None
+
+
+# --- layer-wise Kolen-Pollack feedback -------------------------------------------------
+
+from neuron_games.modulator.random_feedback import RandomFeedback  # noqa: E402
+
+
+def test_layerwise_equals_direct_with_one_hidden_layer() -> None:
+    a = RandomFeedback([9, 4], seed=3, path="direct")
+    b = RandomFeedback([9, 4], seed=3, path="layerwise")
+    torch.testing.assert_close(a.B[0], b.B[0])
+    err = torch.randn(6, 5, 4)
+    torch.testing.assert_close(a.broadcast(err)[0], b.broadcast(err, h=[torch.rand(6, 5, 9)])[0])
+
+
+def test_layerwise_signal_chains_through_next_layer() -> None:
+    fb = RandomFeedback([9, 7, 4], seed=1, path="layerwise")
+    assert [tuple(b.shape) for b in fb.B] == [(7, 9), (4, 7)]
+    err, h = torch.randn(6, 5, 4), [torch.rand(6, 5, 9), torch.rand(6, 5, 7)]
+    s0, s1 = fb.broadcast(err, h)
+    torch.testing.assert_close(s1, err @ fb.B[1])
+    torch.testing.assert_close(s0, (s1 * h[1]) @ fb.B[0])
+
+
+def test_layerwise_kolen_pollack_aligns_every_feedback_matrix(tmp_path) -> None:
+    net = _deep_net(readout="leaky")
+    cfg = NGRunConfig.for_condition("three_factor", n_in=12, n_hidden=9, n_out=4, n_hidden_layers=2,
+                                    readout="leaky", feedback="kolen_pollack", feedback_path="layerwise",
+                                    feedback_decay=0.05, device="cpu", lr=0.5)
+    game = NeuronGame(net, cfg, torch.device("cpu"))
+    gaps0 = [float((game.feedback.B[l] - net.weights[l + 1]).norm()) for l in range(2)]
+    opt = build_optimizer(net, cfg)
+    y = torch.randint(0, 4, (5,))
+    with count_autograd_calls() as calls:
+        for _ in range(5):
+            game.step(_x(), y, opt)
+    assert calls.calls == 0
+    for l in range(2):     # B_l - W_{l+1} shrinks by exactly (1 - d) per step
+        gap = float((game.feedback.B[l] - net.weights[l + 1]).norm())
+        assert gap == pytest.approx(gaps0[l] * 0.95 ** 5, rel=1e-4)
+
+
+def test_deep_layerwise_training_makes_no_autograd_calls(tmp_path) -> None:
+    cfg = NGRunConfig.for_condition("tf_div_energy", diversity="none", n_hidden=16, n_hidden_layers=2,
+                                    readout="leaky", feedback="kolen_pollack", feedback_path="layerwise",
+                                    num_steps=6, epochs=1, device="cpu")
+    with count_autograd_calls() as calls:
+        train(cfg, _loaders(), torch.device("cpu"), tmp_path)
+    assert calls.calls == 0
+    with pytest.raises(ValueError):
+        NGRunConfig(feedback_path="sideways")
