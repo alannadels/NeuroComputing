@@ -1,4 +1,4 @@
-"""784-128-10 fully-connected LIF network with a vendored LIF cell.
+"""Fully-connected LIF network (784-128-10 by default, optionally deeper) with a vendored LIF cell.
 
 Vendored rather than subclassing `snn.Leaky` (plan §8, decision 8): the
 three-factor rule (Workstream A) needs the membrane potential, the surrogate
@@ -146,20 +146,23 @@ class SNNRecord:
 
 
 class FCSNN(nn.Module):
-    """n_in -> n_hidden -> n_out, LIF at both the hidden and output layer."""
+    """n_in -> n_hidden (x n_hidden_layers) -> n_out, LIF hidden layers and an
+    LIF or leaky read-out. Index 0 is the first hidden layer, -1 the read-out."""
 
     def __init__(self, n_in: int = 784, n_hidden: int = 128, n_out: int = 10,
                  alpha: float = 0.905, threshold: float = 1.0,
                  surrogate_slope: float = 25.0, bias: bool = False, readout: str = "spike",
-                 adaptive_threshold: bool = False):
+                 adaptive_threshold: bool = False, n_hidden_layers: int = 1):
         super().__init__()
         if readout not in ("spike", "leaky"):
             raise ValueError(f"unknown readout {readout!r}")
         kw = dict(alpha=alpha, threshold=threshold,
                   surrogate_slope=surrogate_slope, bias=bias)
         self.readout = readout
-        self.layers = nn.ModuleList([
-            LIFLayer(n_in, n_hidden, adaptive_threshold=adaptive_threshold, **kw),
+        hidden = [LIFLayer(n_in if l == 0 else n_hidden, n_hidden,
+                           adaptive_threshold=adaptive_threshold, **kw)
+                  for l in range(n_hidden_layers)]
+        self.layers = nn.ModuleList(hidden + [
             LIFLayer(n_hidden, n_out, spiking=(readout == "spike"), **kw),
         ])
 
@@ -240,4 +243,5 @@ def build_net(cfg) -> FCSNN:
                  alpha=cfg.alpha, threshold=cfg.threshold,
                  surrogate_slope=cfg.surrogate_slope, bias=cfg.bias,
                  readout=getattr(cfg, "readout", "spike"),
-                 adaptive_threshold=getattr(cfg, "threshold_adapt", False))
+                 adaptive_threshold=getattr(cfg, "threshold_adapt", False),
+                 n_hidden_layers=getattr(cfg, "n_hidden_layers", 1))

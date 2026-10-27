@@ -48,7 +48,7 @@ from neuron_games.game import NeuronGame  # noqa: E402
 from neuron_games.model import build_net  # noqa: E402
 from neuron_games.potential.task import spike_count_predictions, task_loss  # noqa: E402
 from neuron_games.timing import peak_memory_mib, reset_peak_memory, synced_time  # noqa: E402
-from neuron_games.train import build_optimizer  # noqa: E402
+from neuron_games.train import bptt_objective, build_optimizer  # noqa: E402
 
 
 def _ms(xs):
@@ -76,12 +76,13 @@ def _train_stepper(cfg, net, device):
         game = NeuronGame(net, cfg, device, collect_metrics=False)
         return lambda x, y: game.step(encode(x, cfg.num_steps, cfg.encoding), y, opt)
     loss_fn = task_loss(cfg.task_loss)
+    params = net.weights
 
     def step(x, y):
         rec = net(encode(x, cfg.num_steps, cfg.encoding))
-        loss = loss_fn(rec.out, y)
+        objective, _, _ = bptt_objective(rec, y, params, cfg, loss_fn)   # includes mu * E_met if set
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        objective.backward()
         opt.step()
     net.train()
     return step

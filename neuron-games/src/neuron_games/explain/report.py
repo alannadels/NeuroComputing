@@ -18,12 +18,18 @@ from ..data import loaders_for
 from ..model import build_net
 
 
+# Fractions of the hidden layer removed by the width-scaled faithfulness test.
+FRACTIONS = (0.1, 0.25, 0.5)
+
+
 def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
     """Load run_dir/config.json and checkpoints/best.pt, rebuild the net
     (model.build_net), build the *test* loader with _baseline.build_loaders
     (same split arguments as the run), and compute for the hidden layer:
 
     - faithfulness_curve with ks = [0, 8, 16, 32, 64]
+    - the same curve with k = a fraction of the layer (FRACTIONS), so the test
+      removes a comparable share of the network at every width
     - stability between the last two epochs' credit (skip if only one epoch)
     - sparsity of the last epoch's credit
 
@@ -77,11 +83,16 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
         n_neurons = last_credit.numel()
         ks = sorted({min(k, n_neurons) for k in [0, 8, 16, 32, 64]})
         faith = faithfulness_curve(net, test_loader, cfg, device, last_credit, layer=layer_idx, ks=ks)
+        ks_frac = [max(1, round(f * n_neurons)) for f in FRACTIONS]
+        faith_frac = faithfulness_curve(net, test_loader, cfg, device, last_credit,
+                                        layer=layer_idx, ks=ks_frac)
+        faith_frac["fractions"] = list(FRACTIONS)
         if n_epochs >= 2:
             stab = stability(_layer_credit(n_epochs - 2), last_credit)
         else:
             stab = {"spearman": None, "top10_jaccard": None, "note": "needs at least 2 epochs"}
-        return {"faithfulness": faith, "stability": stab, "sparsity": sparsity(last_credit)}
+        return {"faithfulness": faith, "faithfulness_fraction": faith_frac,
+                "stability": stab, "sparsity": sparsity(last_credit)}
 
     shapley = _evaluate_credit("epoch_credit_per_neuron")
     if shapley is None:
@@ -92,6 +103,7 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
     # Assemble final report dictionary (top level: Eligibility-Shapley credit)
     report = {
         "faithfulness": shapley["faithfulness"],
+        "faithfulness_fraction": shapley["faithfulness_fraction"],
         "stability": shapley["stability"],
         "sparsity": shapley["sparsity"],
         "taylor": taylor,

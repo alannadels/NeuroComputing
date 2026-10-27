@@ -15,7 +15,9 @@ W_out decay by the same factor:
     W_out <- (1 - d) W_out + dW_out,     B <- (1 - d) B + dW_out
 
 so B - W_out shrinks by (1 - d) per step and the feedback aligns with the
-output weights. The update to B is the output layer's own local update (its
+output weights. Only the last hidden layer's B has a forward counterpart
+(W_out); with several hidden layers, the earlier ones keep fixed random
+direct feedback from the output error (direct feedback alignment). The update to B is the output layer's own local update (its
 error times the presynaptic hidden activity), so nothing is propagated
 backwards through the network. B_l uses the
 same scale as nn.Linear's default init of an N_l -> N_out layer, times
@@ -51,9 +53,8 @@ class RandomFeedback:
         this step's update. Decays W_out in place and moves every B the same way."""
         delta = w_out - w_out_before                  # the update the output layer took
         w_out.sub_(decay * w_out_before)              # W' = (1 - d) W_before + dW
-        for i, b in enumerate(self.B):
-            if b.shape == delta.shape:                # B for the last hidden layer
-                self.B[i] = (1.0 - decay) * b + delta
+        if self.B[-1].shape == delta.shape:           # B of the last hidden layer only
+            self.B[-1] = (1.0 - decay) * self.B[-1] + delta
 
     def alignment(self, w_out: torch.Tensor) -> float | None:
         """Cosine similarity between the last hidden layer's B and W_out."""
