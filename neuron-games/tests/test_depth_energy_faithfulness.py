@@ -319,3 +319,21 @@ def test_posthoc_credit_is_exact_activity_times_signal() -> None:
     expected = (rec.spk[0].detach() * dJds).sum(0).abs().sum(0) / 3
     torch.testing.assert_close(credit, expected)
     assert posthoc_credit(net, [(x, y)], cfg, torch.device("cpu"), layer=1) is None
+
+
+def test_single_neuron_ablation_matches_manual_removal() -> None:
+    from neuron_games.explain.report import single_neuron_ablation
+    torch.manual_seed(0)
+    cfg = NGRunConfig.for_condition("bp_anchor", n_in=12, n_hidden=5, n_out=4, readout="leaky",
+                                    num_steps=6, encoding="direct")
+    net = build_net(cfg)
+    with torch.no_grad():
+        net.layers[0].fc.weight.mul_(3.0)
+    batch = [(torch.rand(7, 12), torch.randint(0, 4, (7,)))]
+    got = single_neuron_ablation(net, batch, cfg, torch.device("cpu"), layer=0)
+    loss_fn = task_loss(cfg.task_loss)
+    x, y = batch[0]
+    base = loss_fn(net(encode(x, 6, "direct")).out, y)
+    for i in (0, 3):
+        m = torch.ones(5); m[i] = 0.0
+        torch.testing.assert_close(got[i], (loss_fn(net(encode(x, 6, "direct"), masks=[m, None]).out, y) - base).detach())

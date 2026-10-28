@@ -77,6 +77,10 @@ def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> di
     f_tay = _margin_frac(_get(explain, "taylor", "faithfulness_fraction"))
     f_post = _margin_frac(_get(explain, "posthoc", "faithfulness_fraction"))
     margins_frac = [m for m in (f_shap, f_tay, f_post) if m is not None]
+    rhos = [r for r in (_get(explain, "ablation", "spearman") or {}).values() if r is not None]
+    rf = _get(explain, "faithfulness_fraction")
+    robust = (rf["random_mean"][rf["fractions"].index(FRACTION_FOR_MARGIN)]
+              if rf and FRACTION_FOR_MARGIN in rf.get("fractions", []) else None)
     return {
         "test_acc": res["test"]["accuracy"],
         "best_val_acc": res["best_val_accuracy"],
@@ -99,6 +103,10 @@ def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> di
         "faith_margin_frac_shapley": f_shap,
         "faith_margin_frac_taylor": f_tay,
         "faith_margin_frac_posthoc": f_post,
+        # rank correlation between credit and measured single-neuron removal effect (best credit)
+        "credit_ablation_rho": max(rhos) if rhos else None,
+        # robustness: test accuracy after removing a random 25% of the first hidden layer
+        "acc_random_removal_25": robust,
         # explainability front: width-scaled margin when available, else the k = 64 one
         "faith_margin_front": (max(margins_frac) if margins_frac
                                else (max(margins) if margins else None)),
@@ -239,12 +247,13 @@ def main(batch_dir: Path) -> int:
           "| ID | test acc | best val | bal. acc | ECE (ts) | s/epoch | train kJ | peak train MiB | "
           "infer ms/img | SOPs/img (total) | SOPs/img (network) | hidden rate | epochs to 95% | faith. margin Shapley | "
           "faith. margin act x signal | faith. margin 25% Shapley | faith. margin 25% act x signal | "
-          "faith. margin 25% post-hoc | stability Shapley | stability act x signal | autograd calls |",
-          "|" + "---|" * 21]
+          "faith. margin 25% post-hoc | credit-ablation rho | acc. after random 25% removal | "
+          "stability Shapley | stability act x signal | autograd calls |",
+          "|" + "---|" * 23]
     for e in exps:
         m = e["metrics"]
         if not m:
-            L.append(f"| {e['id']} | " + " | ".join(["--"] * 20) + " |")
+            L.append(f"| {e['id']} | " + " | ".join(["--"] * 22) + " |")
             continue
         L.append(f"| {e['id']} | {_f(m['test_acc'])} | {_f(m['best_val_acc'])} | {_f(m['balanced_acc'])} | "
                  f"{_f(m['ece_ts'])} | {_f(m['train_s_per_epoch'], 2)} | {_f(m['train_energy_kj'], 2)} | "
@@ -252,7 +261,8 @@ def main(batch_dir: Path) -> int:
                  f"{_f(m['sops_per_image'], 0)} | {_f(m['sops_network_per_image'], 0)} | {_f(m['hidden_rate'], 3)} | {_f(m['epochs_to_95'])} | "
                  f"{_f(m['faith_margin_shapley'])} | {_f(m['faith_margin_taylor'])} | "
                  f"{_f(m.get('faith_margin_frac_shapley'))} | {_f(m.get('faith_margin_frac_taylor'))} | "
-                 f"{_f(m.get('faith_margin_frac_posthoc'))} | "
+                 f"{_f(m.get('faith_margin_frac_posthoc'))} | {_f(m.get('credit_ablation_rho'), 3)} | "
+                 f"{_f(m.get('acc_random_removal_25'))} | "
                  f"{_f(m['stability_shapley'], 3)} | {_f(m['stability_taylor'], 3)} | {_f(m['autograd_calls'])} |")
     # Aggregate runs that share settings (seeds of the same configuration).
     groups: dict[str, list] = {}

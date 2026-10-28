@@ -18,7 +18,7 @@ from ..data import loaders_for
 from ..encoding import encode
 from ..learning_rule import reverse_filter
 from ..model import build_net
-from ..potential.task import output_error
+from ..potential.task import output_error, task_loss
 
 
 # Fractions of the hidden layer removed by the width-scaled faithfulness test.
@@ -49,6 +49,38 @@ def posthoc_credit(net, loader, cfg, device, layer: int) -> torch.Tensor | None:
         total = c if total is None else total + c
         n += targets.numel()
     return None if total is None else total / max(n, 1)
+
+
+@torch.no_grad()
+def single_neuron_ablation(net, loader, cfg, device, layer: int, seed: int = 0) -> torch.Tensor:
+    """Test-loss increase when each neuron of `layer` is removed on its own, [N].
+    Every pass uses the same input encoding (the global RNG is reseeded), so
+    differences come from the removal only. The ground truth that a credit
+    vector is rank-correlated with: independent of how concentrated the
+    network is, unlike the top-k faithfulness margin."""
+    net.eval()
+    loss_fn = task_loss(cfg.task_loss)
+    n = net.layers[layer].fc.out_features
+
+    def mean_loss(masks):
+        torch.manual_seed(seed)
+        total, count = 0.0, 0
+        for data, targets in loader:
+            data, targets = data.to(device), targets.to(device)
+            rec = net(encode(data, cfg.num_steps, cfg.encoding), masks=masks)
+            total = total + loss_fn(rec.out, targets) * targets.numel()
+            count += targets.numel()
+        return total / max(count, 1)
+
+    base = mean_loss(None)
+    out = torch.empty(n, device=device)
+    for i in range(n):
+        m = torch.ones(n, device=device)
+        m[i] = 0.0
+        masks = [None] * len(net.layers)
+        masks[layer] = m
+        out[i] = mean_loss(masks) - base
+    return out.cpu()
 
 
 def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
@@ -109,6 +141,7 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
             return c.to(device)
 
         last_credit = _layer_credit(n_epochs - 1)
+        credit_vectors[key] = last_credit
         n_neurons = last_credit.numel()
         ks = sorted({min(k, n_neurons) for k in [0, 8, 16, 32, 64]})
         faith = faithfulness_curve(net, test_loader, cfg, device, last_credit, layer=layer_idx, ks=ks)
@@ -134,6 +167,7 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
         faith_frac["fractions"] = list(FRACTIONS)
         return {"faithfulness": faith, "faithfulness_fraction": faith_frac, "sparsity": sparsity(credit)}
 
+    credit_vectors: dict[str, torch.Tensor] = {}
     shapley = _evaluate_credit("epoch_credit_per_neuron")
     if shapley is None:
         raise ValueError(f"{run_dir} has no per-epoch credit history")
@@ -148,7 +182,19 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
         "sparsity": shapley["sparsity"],
         "taylor": taylor,
         # same post-hoc credit for every model (activity x exact read-out signal)
-        "posthoc": _evaluate_vector(posthoc_credit(net, test_loader, cfg, device, layer_idx)),
+        "posthoc": None,
+    }
+    post = posthoc_credit(net, test_loader, cfg, device, layer_idx)
+    report["posthoc"] = _evaluate_vector(post)
+    # Credit quality independent of concentration: rank correlation of each
+    # credit vector with the measured single-neuron removal effect.
+    ablation = single_neuron_ablation(net, test_loader, cfg, device, layer_idx)
+    named = {"shapley": credit_vectors.get("epoch_credit_per_neuron"),
+             "taylor": credit_vectors.get("epoch_taylor_credit_per_neuron"), "posthoc": post}
+    report["ablation"] = {
+        "loss_increase": ablation.tolist(),
+        "spearman": {k: (stability(v.detach().cpu(), ablation)["spearman"] if v is not None else None)
+                     for k, v in named.items()},
     }
 
     # 6. Write explain.json
