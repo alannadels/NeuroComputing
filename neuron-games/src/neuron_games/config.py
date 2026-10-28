@@ -102,6 +102,9 @@ class NGRunConfig:
     feedback_decay_hidden: float = -1.0   # layerwise + kolen_pollack: decay for the hidden pairs
                                           # (B_l, W_{l+1}), l < last; < 0 = same as feedback_decay.
                                           # 0: B_l only accumulates W_{l+1}'s updates, W_{l+1} never decays
+    trace_mode: str = "forward"           # forward: store eligibility traces eps | reverse: same
+                                          # update from the stored inputs (learning_rule.reverse_filter),
+                                          # no eps buffers (less memory)
     feedback_normalize: bool = False      # layerwise: divide each chained signal by the next layer's
                                           # mean surrogate derivative (one scalar gain per layer and
                                           # window) so it does not shrink with depth
@@ -168,7 +171,8 @@ class NGRunConfig:
     # LR schedule, identical for every model: halve the learning rate once val
     # accuracy has gone lr_patience epochs without a new best (counter then
     # resets); never below lr * lr_min_factor. "none" keeps it constant.
-    lr_schedule: str = "plateau"          # plateau | none
+    lr_schedule: str = "plateau"          # plateau | cosine (lr * (f + (1 - f) * (1 + cos(pi e / E)) / 2),
+                                          # f = lr_min_factor, after epoch e of E) | none
     lr_factor: float = 0.5
     lr_patience: int = 5
     lr_min_factor: float = 1.0 / 64.0
@@ -212,10 +216,13 @@ class NGRunConfig:
         _check("barrier", self.barrier, BARRIERS)
         _check("credit", self.credit, CREDIT)
         _check("credit_layers", self.credit_layers, ("hidden", "all"))
-        _check("lr_schedule", self.lr_schedule, ("plateau", "none"))
         _check("readout", self.readout, ("spike", "leaky"))
         _check("feedback", self.feedback, ("random", "kolen_pollack"))
         _check("feedback_path", self.feedback_path, ("direct", "layerwise"))
+        _check("trace_mode", self.trace_mode, ("forward", "reverse"))
+        if self.trace_mode == "reverse" and self.diversity != "none":
+            raise ValueError("diversity V reads the eligibility traces; use trace_mode=forward")
+        _check("lr_schedule", self.lr_schedule, ("plateau", "cosine", "none"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none"

@@ -23,7 +23,9 @@ Time, energy and memory come from the controlled cost benchmark
 (cost_benchmark.json: same data, interleaved, repeated) when it exists; the
 end-to-end run numbers are kept in the results table for reference.
   explainability  faithfulness margin = acc(remove k random) - acc(remove top-k
-                  credited); positive = faithful; best of the two credit scores (higher).
+                  credited); positive = faithful; best of the credit scores (higher): Eligibility-Shapley,
+                  activity x learning signal (both logged in training), and a post-hoc
+                  activity x exact read-out signal computed the same way for every model.
                   k = 25% of the hidden layer when the run has the width-scaled curve
                   (comparable across widths), else k = 64 (older runs)
 """
@@ -73,7 +75,8 @@ def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> di
     margins = [m for m in (m_shap, m_tay) if m is not None]
     f_shap = _margin_frac(_get(explain, "faithfulness_fraction"))
     f_tay = _margin_frac(_get(explain, "taylor", "faithfulness_fraction"))
-    margins_frac = [m for m in (f_shap, f_tay) if m is not None]
+    f_post = _margin_frac(_get(explain, "posthoc", "faithfulness_fraction"))
+    margins_frac = [m for m in (f_shap, f_tay, f_post) if m is not None]
     return {
         "test_acc": res["test"]["accuracy"],
         "best_val_acc": res["best_val_accuracy"],
@@ -95,6 +98,7 @@ def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> di
         "faith_margin_best": max(margins) if margins else None,
         "faith_margin_frac_shapley": f_shap,
         "faith_margin_frac_taylor": f_tay,
+        "faith_margin_frac_posthoc": f_post,
         # explainability front: width-scaled margin when available, else the k = 64 one
         "faith_margin_front": (max(margins_frac) if margins_frac
                                else (max(margins) if margins else None)),
@@ -235,12 +239,12 @@ def main(batch_dir: Path) -> int:
           "| ID | test acc | best val | bal. acc | ECE (ts) | s/epoch | train kJ | peak train MiB | "
           "infer ms/img | SOPs/img (total) | SOPs/img (network) | hidden rate | epochs to 95% | faith. margin Shapley | "
           "faith. margin act x signal | faith. margin 25% Shapley | faith. margin 25% act x signal | "
-          "stability Shapley | stability act x signal | autograd calls |",
-          "|" + "---|" * 20]
+          "faith. margin 25% post-hoc | stability Shapley | stability act x signal | autograd calls |",
+          "|" + "---|" * 21]
     for e in exps:
         m = e["metrics"]
         if not m:
-            L.append(f"| {e['id']} | " + " | ".join(["--"] * 19) + " |")
+            L.append(f"| {e['id']} | " + " | ".join(["--"] * 20) + " |")
             continue
         L.append(f"| {e['id']} | {_f(m['test_acc'])} | {_f(m['best_val_acc'])} | {_f(m['balanced_acc'])} | "
                  f"{_f(m['ece_ts'])} | {_f(m['train_s_per_epoch'], 2)} | {_f(m['train_energy_kj'], 2)} | "
@@ -248,6 +252,7 @@ def main(batch_dir: Path) -> int:
                  f"{_f(m['sops_per_image'], 0)} | {_f(m['sops_network_per_image'], 0)} | {_f(m['hidden_rate'], 3)} | {_f(m['epochs_to_95'])} | "
                  f"{_f(m['faith_margin_shapley'])} | {_f(m['faith_margin_taylor'])} | "
                  f"{_f(m.get('faith_margin_frac_shapley'))} | {_f(m.get('faith_margin_frac_taylor'))} | "
+                 f"{_f(m.get('faith_margin_frac_posthoc'))} | "
                  f"{_f(m['stability_shapley'], 3)} | {_f(m['stability_taylor'], 3)} | {_f(m['autograd_calls'])} |")
     # Aggregate runs that share settings (seeds of the same configuration).
     groups: dict[str, list] = {}

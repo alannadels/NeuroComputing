@@ -23,6 +23,7 @@ Every metric is logged for every learning rule (no model-specific metrics):
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -70,6 +71,13 @@ class PlateauHalving:
     def step(self, val_acc: float) -> bool:
         """Call once per epoch after validation. Returns True if the LR was cut."""
         if self.cfg.lr_schedule == "none":
+            return False
+        if self.cfg.lr_schedule == "cosine":
+            self.epochs_done = getattr(self, "epochs_done", 0) + 1
+            f, E = self.cfg.lr_min_factor, max(self.cfg.epochs, 1)
+            new = self.cfg.lr * (f + (1.0 - f) * 0.5 * (1.0 + math.cos(math.pi * min(self.epochs_done, E) / E)))
+            for g in self.opt.param_groups:
+                g["lr"] = new
             return False
         if val_acc > self.best:
             self.best, self.bad_epochs = val_acc, 0
@@ -221,7 +229,7 @@ def reference_phi_cfg(cfg: NGRunConfig) -> NGRunConfig:
     p = CONDITION_PRESETS["ng_full"]
     return dataclasses.replace(cfg, learning_rule="three_factor", optimizer="sgd", bias=False,
                                credit="none", credit_modulates=False, rate_floor=0.0,
-                               diversity_every=1,
+                               diversity_every=1, trace_mode="forward",
                                diversity=p["diversity"], metabolic=p["metabolic"],
                                barrier=p["barrier"])
 

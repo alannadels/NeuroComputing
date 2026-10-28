@@ -128,6 +128,11 @@ class SNNRecord:
     h: list[torch.Tensor] | None = None
     readout: str = "spike"                      # "spike" | "leaky"
     hidden_spike_steps: list[torch.Tensor] | None = None   # per-step hidden spikes (retain_spike_grads)
+    # trace_mode="reverse": eps is not stored; the presynaptic input of every
+    # layer (x_seq, then the previous layer's spikes) and each layer's alpha are
+    # kept instead, and learning_rule.py forms the same update in reverse time.
+    trace_inputs: list[torch.Tensor] | None = None
+    alphas: list[float] | None = None
 
     @property
     def out(self) -> torch.Tensor:
@@ -142,7 +147,7 @@ class SNNRecord:
 
     @property
     def has_traces(self) -> bool:
-        return self.eps is not None and self.h is not None
+        return self.h is not None and (self.eps is not None or self.trace_inputs is not None)
 
 
 class FCSNN(nn.Module):
@@ -173,12 +178,16 @@ class FCSNN(nn.Module):
 
     def forward(self, x_seq: torch.Tensor, record_traces: bool = False,
                 masks: list[torch.Tensor | None] | None = None,
-                record_inputs: bool = False, retain_spike_grads: bool = False) -> SNNRecord:
+                record_inputs: bool = False, retain_spike_grads: bool = False,
+                trace_mode: str = "forward") -> SNNRecord:
         """x_seq: [T, B, n_in]. State starts at zero on every call.
 
         record_traces: also record eps / h (see SNNRecord), written into
             preallocated [T, ...] tensors. Used by the three-factor rule;
             costs O(T * B * fan_in) memory per layer.
+        trace_mode: "forward" stores eps; "reverse" stores no eps (the update is
+            formed from the inputs the forward pass keeps anyway, see
+            learning_rule.py), saving that memory.
         record_inputs: also record each layer's input (rec.inp). Only tests
             need it; training does not, so it is off by default.
         retain_spike_grads: keep the hidden layer's per-step spike tensors with
@@ -194,7 +203,10 @@ class FCSNN(nn.Module):
         spk: list[list[torch.Tensor]] = [[] for _ in self.layers]
         mem: list[list[torch.Tensor]] = [[] for _ in self.layers]
         fan_in = [layer.fc.in_features for layer in self.layers]
-        if record_traces:
+        if trace_mode not in ("forward", "reverse"):
+            raise ValueError(f"unknown trace_mode {trace_mode!r}")
+        store_eps = record_traces and trace_mode == "forward"
+        if store_eps:
             eps_buf = [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in]
         if record_inputs:
             inp_buf = [None] + [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in[1:]]
@@ -210,7 +222,7 @@ class FCSNN(nn.Module):
                 if retain_spike_grads and l == 0 and s.requires_grad:
                     s.retain_grad()
                     hidden_steps.append(s)
-                if record_traces:            # traces are constants for the learning rule
+                if store_eps:                # traces are constants for the learning rule
                     x_d = inp.detach()
                     if t == 0:
                         eps_buf[l][0].copy_(x_d)
@@ -230,7 +242,11 @@ class FCSNN(nn.Module):
         if record_traces:
             # h depends only on u[t], so it is computed for the whole window at
             # once (same values as per step; far fewer kernel launches).
-            rec.eps = eps_buf
+            if store_eps:
+                rec.eps = eps_buf
+            else:
+                rec.trace_inputs = [x_seq.detach()] + [s.detach() for s in rec.spk[:-1]]
+                rec.alphas = [layer.alpha for layer in self.layers]
             rec.h = [fast_sigmoid_grad(m.detach() - layer.thr, layer.surrogate_slope)
                      for m, layer in zip(rec.mem, self.layers)]
         if record_inputs:

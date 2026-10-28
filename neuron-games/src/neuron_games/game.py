@@ -128,7 +128,7 @@ class NeuronGame:
         W = [w.detach() for w in params]
 
         # 1. rollout
-        rec = net(x_seq, record_traces=True)
+        rec = net(x_seq, record_traces=True, trace_mode=getattr(cfg, "trace_mode", "forward"))
 
         # 2. task signal (J); logged scalars stay on the device until the end
         J = self.loss_fn(rec.out, targets)

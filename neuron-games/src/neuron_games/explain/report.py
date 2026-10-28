@@ -15,11 +15,40 @@ from ..config import NGRunConfig
 from .attribution import load_credit
 from .metrics import faithfulness_curve, stability, sparsity
 from ..data import loaders_for
+from ..encoding import encode
+from ..learning_rule import reverse_filter
 from ..model import build_net
+from ..potential.task import output_error
 
 
 # Fractions of the hidden layer removed by the width-scaled faithfulness test.
 FRACTIONS = (0.1, 0.25, 0.5)
+
+
+@torch.no_grad()
+def posthoc_credit(net, loader, cfg, device, layer: int) -> torch.Tensor | None:
+    """Model-agnostic credit computed after training, identical for every model:
+    mean over test examples of |sum_t s_i[t] * dJ/ds_i[t]|, with dJ/ds_i the
+    exact signal of the last hidden layer through the leaky read-out,
+
+        dJ/ds[t] = sum_{t' >= t} alpha_out^(t' - t) delta[t'] @ W_out.
+
+    Only defined for the last hidden layer with a leaky read-out (None otherwise).
+    """
+    if getattr(net, "readout", "spike") != "leaky" or layer != len(net.layers) - 2:
+        return None
+    net.eval()
+    w_out, a_out = net.layers[-1].fc.weight, net.layers[-1].alpha
+    total, n = None, 0
+    for data, targets in loader:
+        data, targets = data.to(device), targets.to(device)
+        rec = net(encode(data, cfg.num_steps, cfg.encoding))
+        delta = output_error(cfg.task_loss, rec.out, targets)              # [T, B, C]
+        sig = reverse_filter(delta, a_out) @ w_out                         # [T, B, N]
+        c = (rec.spk[layer] * sig).sum(dim=0).abs().sum(dim=0)             # [N]
+        total = c if total is None else total + c
+        n += targets.numel()
+    return None if total is None else total / max(n, 1)
 
 
 def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
@@ -94,6 +123,17 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
         return {"faithfulness": faith, "faithfulness_fraction": faith_frac,
                 "stability": stab, "sparsity": sparsity(last_credit)}
 
+    def _evaluate_vector(credit: torch.Tensor | None) -> dict | None:
+        if credit is None:
+            return None
+        n_neurons = credit.numel()
+        ks = sorted({min(k, n_neurons) for k in [0, 8, 16, 32, 64]})
+        faith = faithfulness_curve(net, test_loader, cfg, device, credit, layer=layer_idx, ks=ks)
+        ks_frac = [max(1, round(f * n_neurons)) for f in FRACTIONS]
+        faith_frac = faithfulness_curve(net, test_loader, cfg, device, credit, layer=layer_idx, ks=ks_frac)
+        faith_frac["fractions"] = list(FRACTIONS)
+        return {"faithfulness": faith, "faithfulness_fraction": faith_frac, "sparsity": sparsity(credit)}
+
     shapley = _evaluate_credit("epoch_credit_per_neuron")
     if shapley is None:
         raise ValueError(f"{run_dir} has no per-epoch credit history")
@@ -107,6 +147,8 @@ def run_report(run_dir: str | Path, device: str = "cpu") -> dict:
         "stability": shapley["stability"],
         "sparsity": shapley["sparsity"],
         "taylor": taylor,
+        # same post-hoc credit for every model (activity x exact read-out signal)
+        "posthoc": _evaluate_vector(posthoc_credit(net, test_loader, cfg, device, layer_idx)),
     }
 
     # 6. Write explain.json

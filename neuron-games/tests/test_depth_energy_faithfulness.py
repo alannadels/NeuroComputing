@@ -16,6 +16,7 @@ from neuron_games.learning_rule import LayerSignals, layer_grad
 from neuron_games.model import FCSNN, build_net
 from neuron_games.potential.metabolic import metabolic_value
 from neuron_games.potential.task import task_loss
+from neuron_games.encoding import encode
 from neuron_games.train import bptt_objective, build_optimizer, train
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -238,3 +239,83 @@ def test_hidden_decay_zero_keeps_hidden_weights_undecayed() -> None:
     torch.testing.assert_close(net.weights[2], 0.95 * w2)   # read-out still decays
     w1, _, _, net, _ = run(-1.0)                      # default: same decay as the read-out
     torch.testing.assert_close(net.weights[1], 0.95 * w1)
+
+
+# --- reverse trace mode, cosine schedule, post-hoc credit ------------------------------
+
+from neuron_games.learning_rule import reverse_filter, three_factor_grads  # noqa: E402
+from neuron_games.explain.report import posthoc_credit  # noqa: E402
+
+
+@pytest.mark.parametrize("layers", [1, 2])
+def test_reverse_trace_mode_gives_the_same_update(layers) -> None:
+    torch.manual_seed(0)
+    net = FCSNN(n_in=12, n_hidden=9, n_out=4, alpha=math.exp(-0.1), n_hidden_layers=layers).double()
+    with torch.no_grad():
+        for layer in net.layers:
+            layer.fc.weight.mul_(3.0)
+    x = _x().double()
+    fwd = net(x, record_traces=True)
+    rev = net(x, record_traces=True, trace_mode="reverse")
+    assert rev.eps is None and rev.has_traces
+    g = torch.Generator().manual_seed(2)
+    sigs = [LayerSignals(spike=torch.randn(s.shape, generator=g, dtype=torch.float64),
+                         mem=torch.randn(s.shape, generator=g, dtype=torch.float64)) for s in fwd.spk]
+    for a, b in zip(three_factor_grads(fwd, sigs, net.weights), three_factor_grads(rev, sigs, net.weights)):
+        torch.testing.assert_close(a, b, rtol=1e-10, atol=1e-12)
+
+
+def test_reverse_filter_definition() -> None:
+    d = torch.randn(5, 2, 3, dtype=torch.float64)
+    out = reverse_filter(d, 0.5)
+    for k in range(5):
+        exp = sum(0.5 ** (t - k) * d[t] for t in range(k, 5))
+        torch.testing.assert_close(out[k], exp)
+
+
+def test_reverse_mode_training_matches_forward(tmp_path) -> None:
+    def run(mode):
+        cfg = NGRunConfig.for_condition("tf_div_energy", diversity="none", n_hidden=16, readout="leaky",
+                                        feedback="kolen_pollack", rate_floor=0.01, threshold_adapt=True,
+                                        num_steps=6, epochs=1, device="cpu", trace_mode=mode, seed=3)
+        torch.manual_seed(3)                  # train() does not seed; the runner does
+        return train(cfg, _loaders(), torch.device("cpu"), tmp_path / mode)["net"]
+    a, b = run("forward"), run("reverse")
+    for wa, wb in zip(a.weights, b.weights):
+        torch.testing.assert_close(wa, wb, rtol=1e-4, atol=1e-6)
+    with pytest.raises(ValueError):
+        NGRunConfig.for_condition("tf_div", trace_mode="reverse")
+
+
+def test_cosine_schedule_reaches_floor() -> None:
+    from neuron_games.train import PlateauHalving
+    cfg = NGRunConfig.for_condition("three_factor", lr=1.0, epochs=4, lr_schedule="cosine", lr_min_factor=0.1)
+    net = build_net(cfg)
+    opt = build_optimizer(net, cfg)
+    sched = PlateauHalving(opt, cfg)
+    lrs = []
+    for _ in range(4):
+        sched.step(0.5)
+        lrs.append(opt.param_groups[0]["lr"])
+    assert lrs[0] == pytest.approx(0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi / 4)))
+    assert lrs[-1] == pytest.approx(0.1)
+    assert all(a > b for a, b in zip(lrs, lrs[1:]))
+
+
+def test_posthoc_credit_is_exact_activity_times_signal() -> None:
+    """For the leaky read-out, the post-hoc signal equals the autograd dJ/ds of the hidden layer."""
+    torch.manual_seed(0)
+    cfg = NGRunConfig.for_condition("bp_anchor", n_in=12, n_hidden=9, n_out=4, readout="leaky",
+                                    num_steps=8, encoding="direct")
+    net = build_net(cfg).double()
+    with torch.no_grad():
+        net.layers[0].fc.weight.mul_(3.0)
+    x = torch.rand(3, 12, dtype=torch.float64)
+    y = torch.randint(0, 4, (3,))
+    credit = posthoc_credit(net, [(x, y)], cfg, torch.device("cpu"), layer=0)
+    rec = net(encode(x, cfg.num_steps, cfg.encoding), retain_spike_grads=True)
+    task_loss(cfg.task_loss)(rec.out, y).backward()
+    dJds = torch.stack([s.grad for s in rec.hidden_spike_steps])
+    expected = (rec.spk[0].detach() * dJds).sum(0).abs().sum(0) / 3
+    torch.testing.assert_close(credit, expected)
+    assert posthoc_credit(net, [(x, y)], cfg, torch.device("cpu"), layer=1) is None
