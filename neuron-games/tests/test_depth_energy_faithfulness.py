@@ -212,3 +212,29 @@ def test_deep_layerwise_training_makes_no_autograd_calls(tmp_path) -> None:
     assert calls.calls == 0
     with pytest.raises(ValueError):
         NGRunConfig(feedback_path="sideways")
+
+
+def test_layerwise_normalized_signal_divides_by_mean_h() -> None:
+    fb = RandomFeedback([9, 7, 4], seed=1, path="layerwise")
+    err, h = torch.randn(6, 5, 4), [torch.rand(6, 5, 9), torch.rand(6, 5, 7) * 0.1]
+    s0, s1 = fb.broadcast(err, h, normalize=True)
+    torch.testing.assert_close(s1, err @ fb.B[1])               # the last hidden layer is unchanged
+    torch.testing.assert_close(s0, ((s1 * h[1]) @ fb.B[0]) / h[1].mean())
+
+
+def test_hidden_decay_zero_keeps_hidden_weights_undecayed() -> None:
+    def run(d_hidden):
+        net = _deep_net(readout="leaky")
+        cfg = NGRunConfig.for_condition("three_factor", n_in=12, n_hidden=9, n_out=4, n_hidden_layers=2,
+                                        readout="leaky", feedback="kolen_pollack", feedback_path="layerwise",
+                                        feedback_decay=0.05, feedback_decay_hidden=d_hidden, device="cpu", lr=0.0)
+        game = NeuronGame(net, cfg, torch.device("cpu"))
+        w1, w2, b0 = (net.weights[1].clone(), net.weights[2].clone(), game.feedback.B[0].clone())
+        game.step(_x(), torch.randint(0, 4, (5,)), build_optimizer(net, cfg))
+        return w1, w2, b0, net, game
+    w1, w2, b0, net, game = run(0.0)                  # lr 0: the only weight change is the KP decay
+    torch.testing.assert_close(net.weights[1], w1)    # hidden-to-hidden weights not decayed
+    torch.testing.assert_close(game.feedback.B[0], b0)
+    torch.testing.assert_close(net.weights[2], 0.95 * w2)   # read-out still decays
+    w1, _, _, net, _ = run(-1.0)                      # default: same decay as the read-out
+    torch.testing.assert_close(net.weights[1], 0.95 * w1)

@@ -109,7 +109,8 @@ class NeuronGame:
         Spiking read-out: the error is on the output spikes (spike pathway, x h).
         Leaky read-out: it is on the read-out membrane (membrane pathway, du/dW = eps)."""
         delta = output_error(self.cfg.task_loss, out, targets)
-        hidden = [LayerSignals(spike=s) for s in self.feedback.broadcast(delta, h)]
+        hidden = [LayerSignals(spike=s) for s in
+                  self.feedback.broadcast(delta, h, normalize=getattr(self.cfg, "feedback_normalize", False))]
         if getattr(self.net, "readout", "spike") == "leaky":
             return hidden + [LayerSignals(mem=delta)]
         return hidden + [LayerSignals(spike=delta)]
@@ -169,9 +170,13 @@ class NeuronGame:
             project_(params, cfg)
         if cfg.feedback == "kolen_pollack":
             if self.feedback.path == "layerwise":     # B_l tracks W_{l+1} for every hidden layer
-                for l in range(len(params) - 1):
+                d_hidden = getattr(cfg, "feedback_decay_hidden", -1.0)
+                d_hidden = cfg.feedback_decay if d_hidden < 0 else d_hidden
+                last = len(params) - 1
+                for l in range(last):
                     self.feedback.kolen_pollack_(params[l + 1].data, before[l + 1],
-                                                 cfg.feedback_decay, index=l)
+                                                 cfg.feedback_decay if l + 1 == last else d_hidden,
+                                                 index=l)
             else:
                 self.feedback.kolen_pollack_(params[-1].data, before[-1], cfg.feedback_decay)
         if getattr(cfg, "threshold_adapt", False):

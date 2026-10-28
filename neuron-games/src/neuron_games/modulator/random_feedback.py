@@ -29,7 +29,12 @@ at the same time step (no propagation through time). Each B_l receives the
 Kolen-Pollack update of W_{l+1}, so it tracks W_{l+1} the way B_{L-1} tracks
 W_out. Every update is local (a layer's own update and decay); no autograd.
 This is a layer-by-layer signal path, unlike the direct broadcast, and must
-be described as such. With one hidden layer both paths are identical. The update to B is the output layer's own local update (its
+be described as such. With one hidden layer both paths are identical.
+
+Each chained step multiplies the signal by h_{l+1} (mostly << 1), so it
+shrinks with depth. normalize=True divides it by mean(h_{l+1}) over the window,
+one scalar gain per layer (a global, neuromodulator-like factor; not a
+per-synapse quantity). The update to B is the output layer's own local update (its
 error times the presynaptic hidden activity), so nothing is propagated
 backwards through the network. B_l uses the
 same scale as nn.Linear's default init of an N_l -> N_out layer, times
@@ -61,9 +66,11 @@ class RandomFeedback:
             b = (torch.rand(rows, n_l, generator=g, dtype=dtype) * 2.0 - 1.0) * bound
             self.B.append(b.to(device))
 
-    def broadcast(self, out_err: torch.Tensor, h: list[torch.Tensor] | None = None) -> list[torch.Tensor]:
+    def broadcast(self, out_err: torch.Tensor, h: list[torch.Tensor] | None = None,
+                  normalize: bool = False) -> list[torch.Tensor]:
         """out_err: [T, B, N_out] -> one [T, B, N_l] signal per hidden layer.
-        h: per-layer surrogate derivatives [T, B, N_l] (needed for "layerwise")."""
+        h: per-layer surrogate derivatives [T, B, N_l] (needed for "layerwise").
+        normalize: layerwise only, divide each chained signal by mean(h_{l+1})."""
         if self.path == "direct":
             return [out_err @ b for b in self.B]
         n = len(self.B)
@@ -71,6 +78,8 @@ class RandomFeedback:
         sig[-1] = out_err @ self.B[-1]
         for l in range(n - 2, -1, -1):
             sig[l] = (sig[l + 1] * h[l + 1]) @ self.B[l]
+            if normalize:
+                sig[l] = sig[l] / h[l + 1].mean().clamp_min(1e-6)
         return sig
 
     @torch.no_grad()

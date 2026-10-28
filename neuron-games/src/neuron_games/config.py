@@ -99,6 +99,12 @@ class NGRunConfig:
                                           # output error through its own B) | layerwise (layer l gets
                                           # layer l+1's signal through B_l, which tracks W_{l+1});
                                           # identical with one hidden layer
+    feedback_decay_hidden: float = -1.0   # layerwise + kolen_pollack: decay for the hidden pairs
+                                          # (B_l, W_{l+1}), l < last; < 0 = same as feedback_decay.
+                                          # 0: B_l only accumulates W_{l+1}'s updates, W_{l+1} never decays
+    feedback_normalize: bool = False      # layerwise: divide each chained signal by the next layer's
+                                          # mean surrogate derivative (one scalar gain per layer and
+                                          # window) so it does not shrink with depth
     feedback_seed_offset: int = 7919      # B is drawn from seed + offset, independent of W init
 
     # --- V: diversity (proposal §5) ---
