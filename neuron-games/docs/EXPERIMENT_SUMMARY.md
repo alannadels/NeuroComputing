@@ -1,8 +1,8 @@
-# Experiment summary (batches 01-08, 2026-10-21 to 2026-10-28)
+# Experiment summary (batches 01-09, 2026-10-21 to 2026-10-28)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
-nothing is rerun by accident. About 210 training runs in total; every
+nothing is rerun by accident. About 260 training runs in total; every
 configuration below can be rerun with the code on this branch.
 
 ## Setup (unchanged across all batches)
@@ -68,10 +68,10 @@ identifies the neurons that matter).
 
 | front | status |
 |---|---|
-| accuracy | **tied** at 128 hidden, batch 256 (97.59 +- 0.09% vs 97.63 +- 0.05%, batch 07); -0.2 pt at 1024, -0.5 pt at T = 10 (batch 05) |
-| energy | **won at high sparsity, after fixing our homeostasis** (batch 08): at ~470 network SOPs ours is 97.09 +- 0.07% vs penalized backprop 96.81 +- 0.08%; at ~780-1,100 SOPs ours is at least as accurate with fewer SOPs. At low sparsity (~3,000+) backprop is as accurate with fewer SOPs. Backprop's settings under the penalty were not tuned yet, so this needs a fair re-check. Measured GPU training energy 23% lower per step (follows from the faster step); inference energy tied |
+| accuracy | **tied** on MNIST at 128 hidden, batch 256 (97.59 +- 0.09% vs 97.63 +- 0.05%, batch 07); -0.25 pt with two hidden layers, -1.25 pt with three, -0.4 pt at 1024 hidden, -0.35 pt at T = 10; Fashion-MNIST -0.75 pt (87.55% vs 88.30%, batch 09). Our rule often peaks early and then degrades (see open problems) |
+| energy | **tie on accuracy vs sparsity once both are tuned** (batch 09): at ~500 network SOPs ours 97.06 +- 0.15% vs penalized backprop with its best lr 97.12 +- 0.07% (the batch-08 "+0.28 pt" was untuned backprop). 3x fewer SOPs than unpenalized backprop at equal accuracy. Measured GPU training energy 30-37% lower per step (follows from the faster step); inference energy tied |
 | efficiency | **won** (batches 07-08): training step 28% faster than backprop (5.5 vs 7.6 ms at batch 256), 18% faster per epoch end to end, 26% less training energy; 33% faster with two hidden layers, 24% faster at 1024 hidden; per-step tie at T = 10 (still 9% faster per epoch). Costs: +18% peak training memory at 128 hidden, +53% at 1024; inference latency tied. Both models share the same Python-loop forward pass, so a compiled implementation could change the ratio |
-| explainability | mixed: unpenalized, our credit is far more faithful (25% margin +0.40 vs +0.04), but under the energy penalty backprop's credit becomes faithful too and is more faithful than ours at high sparsity (batch 07). Faithfulness mostly tracks sparsity |
+| explainability | mixed: unpenalized, our credit is far more faithful (25% margin +0.40 vs +0.04; credit vs single-neuron removal rank correlation 0.86 vs 0.57). Under the energy penalty backprop concentrates its computation in few neurons, which its credit then identifies better (rho 0.93 vs 0.84-0.88); our sparse network spreads computation and is more robust to random neuron loss (91.4% vs 89.5% after removing 25%; 81.5% vs 75.3% on Fashion-MNIST) (batch 09) |
 
 Progress of the best result at 128 hidden: v0 94.19% (gap -3.4 pt) ->
 batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
@@ -106,6 +106,11 @@ sparsity:
 | ours, mu 2.5e-5, thresholds off | 97.26 +- 0.06% | 833 |
 | backprop, mu 1e-4 | 96.81 +- 0.08% | 470 |
 | ours, mu 1e-4, thresholds off | 97.09 +- 0.07% | 467 |
+
+Batch 09 tuned penalized backprop's learning rate (Adam 3e-4 / 1e-3 / 3e-3 at
+mu 1e-4): with lr 3e-4 it reaches 97.12 +- 0.07% at 525 SOPs, tying ours
+(97.06 +- 0.15% at 472). The high-sparsity accuracy advantage was untuned
+backprop and is withdrawn.
 
 ## What worked
 
@@ -160,17 +165,26 @@ neurons).
 
 ## Open problems and untried directions
 
+0. **Late-training decline (most direct accuracy lever).** In many of our runs
+   validation accuracy peaks early (sometimes by epoch 8-10) and then falls
+   (to ~95.6% by epoch 50); backprop does not do this. Best checkpoints are
+   reported, so early peaks cost test accuracy. Cause not yet found. A cosine
+   schedule damps it slightly (+0.2 pt).
 1. **Training cost.** Faster than backprop except at T = 10 (per-step tie);
    the remaining overhead is the barrier (~0.8 ms) and floor (~0.4 ms) terms.
    Training memory at 1024 hidden is +53%.
-2. **Depth.** Two hidden layers now work (-0.25 pt); 3+ layers untested, and
-   our deeper network is not yet more accurate than our one-layer one.
-3. **Fair re-check of the energy result.** Tune penalized backprop (e.g. its
-   learning rate) as much as our homeostasis was tuned before claiming the
-   high-sparsity advantage.
+2. **Depth.** Two hidden layers work (-0.25 pt); three do not (-1.25 pt, batch
+   09): the first layer stays dense (46%) and its update is ~20x backprop's,
+   because the normalization compounds over chained layers.
+3. **Reverse-time traces** (`trace_mode=reverse`) save memory (+7% instead of
+   +18% vs backprop) with identical gradients, but dense runs with it peaked
+   early in all 3 seeds (97.30% vs 97.59%); not adopted until a larger seed
+   comparison.
 4. **Short windows and width.** Accuracy gaps at T = 10 (-0.35 pt) and 1024
    hidden (-0.4 pt), single seed at batch 256.
-5. **Other datasets.** Nothing has been run beyond MNIST yet.
+5. **Fashion-MNIST** (batch 09, no retuning): ours -0.75 pt vs backprop
+   (dense); +0.95 pt vs penalized backprop at its default lr (not tuned there
+   yet, so not a claim).
 
 
 ## Experiment protocol
