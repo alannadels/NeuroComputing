@@ -1,14 +1,15 @@
-# Experiment summary (batches 01-06, 2026-10-21 to 2026-10-27)
+# Experiment summary (batches 01-07, 2026-10-21 to 2026-10-27)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
-nothing is rerun by accident. About 140 training runs in total; every
+nothing is rerun by accident. About 175 training runs in total; every
 configuration below can be rerun with the code on this branch.
 
 ## Setup (unchanged across all batches)
 
 - MNIST, 5,000-image validation split, rate coding, T = 25 time steps
 - fully connected LIF SNN, 784-128-10 unless noted, 50 epochs, batch 128
+  (batch 256 from batch 07 on, for both models)
 - LR halved after 5 epochs without validation improvement (floor lr/64)
 - our method: three-factor rule (`learning_rule = three_factor`), no autograd;
   every run is audited and aborts on any autograd call
@@ -28,7 +29,8 @@ not meaningful. Everything marked "3 seeds" is mean +- std over seeds 1-3.
 python scripts/run_snn.py --model tf_div_energy \
   --set diversity=none --set mu=0 --set momentum=0.9 --set lr=0.2 \
   --set readout=leaky --set feedback=kolen_pollack --set feedback_decay=1e-3 \
-  --set rate_floor=0.01 --set threshold_adapt=true --set threshold_target=0.05
+  --set rate_floor=0.01 --set threshold_adapt=true --set threshold_target=0.05 \
+  --set batch_size=256
 ```
 
 In words: three-factor rule, leaky (non-spiking) read-out, Kolen-Pollack
@@ -57,34 +59,32 @@ identifies the neurons that matter).
 
 | front | status |
 |---|---|
-| accuracy | within 0.1 pt of backprop at 128 hidden, 0.2 pt at 1024, 0.5 pt at T = 10 |
-| energy | **parity, not an advantage.** 3-12x fewer network SOPs than plain backprop, but backprop given the same energy penalty reaches the same sparsity at the same accuracy (batch 06, below). Total synaptic events (input layer included) only ~2% fewer in a one-hidden-layer network; measured GPU energy per training step ~25% higher; inference energy tied |
-| efficiency | training step ~20% slower than plain backprop, ~11% slower than energy-penalized backprop (+60% at T = 10), ~20 MiB more training memory, inference latency tied; at batch 256 time per epoch ties |
-| explainability | credit ~3x more faithful than for plain backprop at 128 hidden (+0.36 vs +0.13), but faithfulness mostly tracks sparsity: penalized backprop's credit becomes faithful too (batch 06). Both near 0 at 1024 hidden with k = 64; the width-scaled test (25% of the layer) is used from batch 06 on |
+| accuracy | **tied** at 128 hidden, batch 256 (97.59 +- 0.09% vs 97.63 +- 0.05%, batch 07); -0.2 pt at 1024, -0.5 pt at T = 10 (batch 05) |
+| energy | **lost on synaptic operations.** 3x fewer network SOPs than plain backprop, but backprop given the same energy penalty is more accurate at every matched sparsity, and the gap grows with sparsity (batch 07, below). Measured GPU training energy is now 23% lower per step (follows from the faster step); inference energy tied |
+| efficiency | **won** (batch 07): training step 28% faster than backprop (5.5 vs 7.6 ms at batch 256), 18% faster per epoch end to end, 26% less training energy; 34% faster with two hidden layers. Costs: +18% peak training memory; inference latency tied. Both models share the same Python-loop forward pass, so a compiled implementation could change the ratio |
+| explainability | mixed: unpenalized, our credit is far more faithful (25% margin +0.40 vs +0.04), but under the energy penalty backprop's credit becomes faithful too and is more faithful than ours at high sparsity (batch 07). Faithfulness mostly tracks sparsity |
 
 Progress of the best result at 128 hidden: v0 94.19% (gap -3.4 pt) ->
 batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
--0.1 pt).
+-0.1 pt) -> batch 07 97.59% at batch 256 (gap -0.04 pt, tied).
 
-### Energy-matched comparison (batch 06, 1 seed)
+### Energy-matched comparison (batch 07, 3 seeds, batch 256)
 
 Backprop trained on J + mu * E_met, the same energy function our method pays
-(`--model bp_snn --set metabolic=basic --set mu=...`):
+(`--model bp_snn --set metabolic=basic --set mu=...`); ours is the best
+configuration with the same mu:
 
-| model | mu | test acc | network SOPs / img |
-|---|---|---|---|
-| backprop | 0 | 97.68% | 10,225 |
-| backprop | 5e-6 | 97.72% | 3,229 |
-| backprop | 2.5e-5 | 97.23% | 981 |
-| backprop | 1e-4 | 96.41% | 440 |
-| ours | 0 (best config) | 97.58% | 3,361 |
-| ours | 5e-6 (best config) | 97.57% | 1,804 |
-| ours | 2.5e-5 + floor 0.01 (batch 05, 3 seeds) | 97.28% | 900 |
-| ours | 4e-5 (batch 05) | 95.63% | 461 |
+| mu | backprop: test acc | backprop: network SOPs | ours: test acc | ours: network SOPs |
+|---|---|---|---|---|
+| 0 | 97.63 +- 0.05% | 11,339 | 97.59 +- 0.09% | 3,858 |
+| 5e-6 | 97.62 +- 0.12% | 3,044 | 97.44 +- 0.07% | 1,775 |
+| 2.5e-5 | 97.45 +- 0.11% | 1,097 | 96.78 +- 0.25% | 1,112 |
+| 1e-4 | 96.81 +- 0.08% | 470 | 95.70 +- 0.15% | 622 |
 
-Both models lie on the same accuracy-vs-SOPs curve within noise: the sparsity
-comes from the energy term, not from the learning rule. The defensible claim
-is that our rule matches backprop's sparsity frontier without backpropagation.
+The same mu gives both models nearly the same sparsity, and backprop is more
+accurate at every sparsity level: the sparsity comes from the energy term, not
+from the learning rule, and our rule loses more accuracy under the penalty.
+(Batch 06 suggested parity on one seed; 3 seeds do not support it.)
 
 ## What worked
 
@@ -97,6 +97,8 @@ is that our rule matches backprop's sparsity frontier without backpropagation.
 | wider hidden layer (256 / 512 / 1024) on the batch-05 base | trains fine, 1024 best (98.03%); it collapsed to silence in batches 02-03 before leaky + KP + no V | 05 |
 | SGD momentum 0.9 (lr 0.2) instead of plain SGD (lr 2.0) | small gain, converges ~40% sooner | 01 |
 | metabolic energy E with the spiking read-out (v0-era) | required for learning at all: without it the hidden layer saturates at the maximum rate | 01 |
+| computing the surrogate derivative h once per window instead of per time step, and one host transfer per step for logged values (was ~11 syncs) | our step 10.5 -> 5.9 ms at batch 128, identical results; both models were bound by kernel-launch overhead, not GPU math | 07 |
+| energy penalty (mu 5e-6) on a two-hidden-layer network with direct feedback | +0.8 pt over mu 0 (96.51% vs 95.67%), both layers ~5% firing, 26% fewer total SOPs than backprop; still -1.3 pt vs backprop | 07 |
 | batch size 256 (both models) | 34-36% faster per epoch for both, accuracy unchanged for both (97.59% ours, 97.67% backprop); per-epoch time then ties with backprop (4.67 vs 4.68 s) | 05, 06 |
 
 The energy weight `mu` is an accuracy-sparsity dial, not an accuracy lever
@@ -128,24 +130,24 @@ neurons).
 | KP decay above 1e-3 (3e-3, 5e-3, 1e-2) | -0.3 to -0.8 pt | 05 |
 | firing-rate floor as a fix for silent wide networks | does not reach silent neurons (the surrogate derivative is ~0 far below threshold) | 03 |
 | 100 epochs instead of 50 | no gain (saturated) | 05 |
-| two hidden layers (784-128-128-10) with fixed random direct feedback to the first layer and Kolen-Pollack on the second | 96.53% vs backprop 97.78% and vs our one-layer 97.58%; first layer stays dense (36% rate), more hidden-to-hidden SOPs than backprop, 11 epochs to 95%. The first layer needs an aligned signal | 06 |
+| two hidden layers (784-128-128-10) with fixed random direct feedback to the first layer and Kolen-Pollack on the second | 96.53% (batch 128) / 95.67% (batch 256) vs backprop 97.8%; first layer stays dense (36% rate), more hidden-to-hidden SOPs than backprop. The first layer needs an aligned signal | 06, 07 |
+| layer-wise Kolen-Pollack (`feedback_path=layerwise`) as that signal, as implemented | 94.89 +- 0.37%, worse than direct. The first layer's signal vanishes (chained through the second layer's surrogate h and a 1/sqrt(N) feedback matrix), and validation accuracy decays late, likely because the KP decay also shrinks the hidden-to-hidden weights. Retry only with those two fixed | 07 |
 | within noise (single seed): lr 0.1 / 0.3 / 0.5, momentum 0.8 / 0.95, KP decay 3e-4, feedback scale 0.5 / 2, barrier weight 1e-3 / 0.1, surrogate slope 5 / 10 / 40, LR patience 3 / 10, membrane time constant 5 / 20 steps, batch 64, adaptive-threshold target 2-5% | no reliable change | 02, 03, 05 |
 
 ## Open problems and untried directions
 
-1. **Training cost.** Our step has ~2-3 ms of fixed, T-independent overhead
-   (potential terms, Kolen-Pollack and threshold updates, many small
-   kernels). Profiling and fusing it is the most direct route to the
-   efficiency front.
-2. **Depth.** The first of two hidden layers needs an aligned learning signal
-   (batch 06). Candidates: layer-wise Kolen-Pollack (layer 1's signal is
-   layer 2's signal through a feedback matrix tracking W_2; local, no
-   autograd), energy pressure on layer 1 only, larger direct-feedback scale.
-3. **Energy curve on 3 seeds** for both models (batch 06 was 1 seed).
+1. **Training cost.** Now faster than backprop; the remaining overhead is the
+   barrier (~0.8 ms) and floor (~0.4 ms) terms. Confirm the advantage at
+   T = 10 and 1024 hidden.
+2. **Depth.** The first of two hidden layers needs an aligned learning signal.
+   Next: layer-wise Kolen-Pollack without decaying the hidden weights and with
+   a rescaled signal, combined with the energy penalty (batch 07).
+3. **Accuracy under the energy penalty.** Our rule loses accuracy faster than
+   backprop as mu grows; candidates are the adaptive-threshold target and the
+   rate floor fighting the penalty at high sparsity.
 4. **Short windows.** The gap is largest at T = 10 (-0.5 pt).
 5. **Other datasets.** Nothing has been run beyond MNIST yet.
-6. **Benchmark at batch 256.** `cost_benchmark.py` times every experiment at
-   the first experiment's batch size; it should use each experiment's own.
+
 
 ## Experiment protocol
 
