@@ -21,7 +21,7 @@ Usage (from neuron-games/):
     ng_snn         full Neuron Games (no backprop)          = condition ng_full
     bp_snn         backprop baseline (surrogate BPTT)       = condition bp_anchor
     three_factor, tf_div, tf_div_energy, ng_full_st2       no-backprop ablation rows
---dataset: mnist | fashion_mnist
+--dataset: mnist | fashion_mnist | cifar10 | cifar100 (network input / output sizes follow it)
 
 Prints one JSON line prefixed with RESULT: at the end (model, dataset,
 learning rule, test accuracy, train / val / test time, autograd calls during
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=["train", "eval", "validate"], default="train",
                    help="validate: build and check the configuration only, no training")
     p.add_argument("--model", choices=sorted(MODELS), default="ng_snn")
-    p.add_argument("--dataset", default="mnist", help="mnist | fashion_mnist")
+    p.add_argument("--dataset", default="mnist", help="mnist | fashion_mnist | cifar10 | cifar100")
     p.add_argument("--device", default="cuda", help="cuda | mps | cpu (never falls back)")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)

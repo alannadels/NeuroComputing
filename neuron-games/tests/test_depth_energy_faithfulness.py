@@ -1,6 +1,7 @@
 """Deeper networks, energy-penalized backprop, and the width-scaled faithfulness test."""
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -337,3 +338,23 @@ def test_single_neuron_ablation_matches_manual_removal() -> None:
     for i in (0, 3):
         m = torch.ones(5); m[i] = 0.0
         torch.testing.assert_close(got[i], (loss_fn(net(encode(x, 6, "direct"), masks=[m, None]).out, y) - base).detach())
+
+
+# --- datasets: network sizes follow the dataset ------------------------------------------
+
+@pytest.mark.parametrize("name,shape", [("mnist", (784, 10)), ("fashion_mnist", (784, 10)),
+                                        ("cifar10", (3072, 10)), ("CIFAR-100", (3072, 100))])
+def test_network_size_follows_dataset(name, shape) -> None:
+    cfg = NGRunConfig.for_condition("tf_div_energy", dataset=name)
+    assert (cfg.n_in, cfg.n_out) == shape
+    net = build_net(cfg)
+    assert net.layers[0].fc.in_features == shape[0] and net.layers[-1].fc.out_features == shape[1]
+    x = encode(torch.rand(2, 3 if shape[0] == 3072 else 1, 32 if shape[0] == 3072 else 28,
+                          32 if shape[0] == 3072 else 28), 4, "rate")
+    assert net(x).out.shape == (4, 2, shape[1])
+    assert NGRunConfig.from_dict(json.loads(cfg.to_json())).n_in == shape[0]     # round trip
+
+
+def test_explicit_sizes_still_win() -> None:
+    cfg = NGRunConfig.for_condition("bp_anchor", dataset="cifar10", n_in=12, n_out=4)
+    assert (cfg.n_in, cfg.n_out) == (12, 4)

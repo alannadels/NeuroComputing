@@ -54,9 +54,14 @@ DIVERSITY_KERNELS = ("mci", "vanrossum", "binned", "count", "schoenberg")
 METABOLIC = ("none", "basic")
 BARRIERS = ("none", "quadratic", "log")
 CREDIT = ("none", "eligibility_shapley", "shapley_taylor")
-DATASETS = ("MNIST", "FashionMNIST")          # 28x28 grayscale, 10 classes (proposal §12.1)
+DATASETS = ("MNIST", "FashionMNIST", "CIFAR10", "CIFAR100")
 DATASET_ALIASES = {"mnist": "MNIST", "fashion_mnist": "FashionMNIST",
-                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST"}
+                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST",
+                   "cifar10": "CIFAR10", "cifar-10": "CIFAR10", "cifar_10": "CIFAR10",
+                   "cifar100": "CIFAR100", "cifar-100": "CIFAR100", "cifar_100": "CIFAR100"}
+# (inputs, classes) per dataset: 28x28 grayscale or 32x32x3 RGB images, flattened.
+DATASET_SHAPES = {"MNIST": (784, 10), "FashionMNIST": (784, 10),
+                  "CIFAR10": (3072, 10), "CIFAR100": (3072, 100)}
 
 
 def canonical_dataset(name: str) -> str:
@@ -70,11 +75,11 @@ def canonical_dataset(name: str) -> str:
 class NGRunConfig:
     condition: str = "bp_anchor"
 
-    # --- Network: 784-128-10 fully-connected LIF (plan §1, §1.5) ---
-    n_in: int = 784
+    # --- Network: n_in-128-n_out fully-connected LIF (plan §1, §1.5) ---
+    n_in: int = 0                         # 0: from the dataset (784 for MNIST / Fashion-MNIST, 3072 for CIFAR)
     n_hidden: int = 128
     n_hidden_layers: int = 1              # hidden LIF layers of n_hidden neurons each
-    n_out: int = 10
+    n_out: int = 0                        # 0: the dataset's number of classes (10, or 100 for CIFAR-100)
     alpha: float = math.exp(-1.0 / 10.0)  # membrane decay, tau_m = 10 steps
     threshold: float = 1.0
     surrogate_slope: float = 25.0         # fast-sigmoid k
@@ -83,7 +88,8 @@ class NGRunConfig:
                                           # leaky-integrator read-out (membrane = logits)
 
     # --- Input / task (J) ---
-    dataset: str = "MNIST"                # MNIST | FashionMNIST (aliases: mnist, fashion_mnist)
+    dataset: str = "MNIST"                # MNIST | FashionMNIST | CIFAR10 | CIFAR100
+                                          # (aliases: mnist, fashion_mnist, cifar10, cifar100)
     num_steps: int = 25                   # T: one adaptation window = one presentation
     encoding: str = "rate"                # rate (Bernoulli) | direct (same pixels each step)
     task_loss: str = "ce_rate"            # ce_rate (mean_t CE on spk[t]) | ce_count (CE on spike counts)
@@ -203,6 +209,11 @@ class NGRunConfig:
                 raise ValueError(f"unknown {name} {value!r}; known: {list(allowed)}")
 
         self.dataset = canonical_dataset(self.dataset)
+        d_in, d_out = DATASET_SHAPES[self.dataset]
+        if self.n_in <= 0:
+            self.n_in = d_in
+        if self.n_out <= 0:
+            self.n_out = d_out
         if self.condition not in CONDITIONS:
             raise ValueError(f"unknown condition {self.condition!r}; known: {sorted(CONDITIONS)}")
         _check("encoding", self.encoding, ("rate", "direct"))
