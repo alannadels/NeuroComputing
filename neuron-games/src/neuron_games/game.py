@@ -171,7 +171,31 @@ class NeuronGame:
         state.update_rates(rec)
         state.window += 1
 
-        acc = float((spike_count_predictions(rec.out) == targets).float().mean())
+        # Per-step metrics (acc, rates, grad_norms, update_norms) are tiny GPU
+        # reductions, but each separate float()/`.item()` forces a device→host
+        # sync. On a 128-batch step at T=25 those syncs add ~2 ms on top of the
+        # math itself. Batching them into one .cpu().tolist() cuts 7 (or more at
+        # depth) syncs down to one. metric_sync_batched=False keeps the original
+        # per-metric path for a cost baseline (see experiments/batch_db03).
+        n_rates = len(rec.spk)
+        n_grads = len(grads)
+        if getattr(cfg, "metric_sync_batched", True):
+            acc_t = (spike_count_predictions(rec.out) == targets).float().mean()
+            rates_t = torch.stack([s.mean() for s in rec.spk])
+            grad_norms_t = torch.stack([g.norm() for g in grads])
+            update_norms_t = torch.stack([d.norm() for d in state.prev_delta_w])
+            bundle = torch.cat([acc_t.unsqueeze(0), rates_t, grad_norms_t,
+                                update_norms_t]).detach().cpu().tolist()
+            acc = bundle[0]
+            rates = bundle[1:1 + n_rates]
+            grad_norms = bundle[1 + n_rates:1 + n_rates + n_grads]
+            update_norms = bundle[1 + n_rates + n_grads:]
+        else:
+            acc = float((spike_count_predictions(rec.out) == targets).float().mean())
+            rates = [float(s.mean()) for s in rec.spk]
+            grad_norms = [float(g.norm()) for g in grads]
+            update_norms = [float(d.norm()) for d in state.prev_delta_w]
+
         # Activity x learning-signal credit: |sum_t s_i[t] * L_i[t]| per example,
         # averaged over the batch, with L_i the neuron's own task signal (the
         # random-feedback broadcast). First-order estimate of the task-loss
@@ -182,10 +206,10 @@ class NeuronGame:
         return WindowResult(
             J=J, acc=acc, phi=phi, reward=reward,
             components={"J": J, **pot.components, **pot.info},
-            rates=[float(s.mean()) for s in rec.spk],
+            rates=rates,
             credit_phi=credit_phi,
-            grad_norms=[float(g.norm()) for g in grads],
-            update_norms=[float(d.norm()) for d in state.prev_delta_w],
+            grad_norms=grad_norms,
+            update_norms=update_norms,
             taylor_credit=taylor,
             feedback_alignment=self.feedback.alignment(params[-1]) if self.collect_metrics else None,
         )

@@ -1,4 +1,4 @@
-# Experiment summary (batches 01-05, 2026-10-21 to 2026-10-23)
+# Experiment summary (batches 01-05 + db01-db03, 2026-10-21 to 2026-10-28)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
@@ -48,6 +48,8 @@ test accuracy (97.56% vs 97.54%) with fewer settings.
 | ours, best, 1024 hidden | 98.03 +- 0.06% | 14,621 | +0.01 | 9.7 |
 | backprop, T = 10 | 97.72 +- 0.04% | 5,689 | +0.03 | 3.5 |
 | ours, best, T = 10 | 97.21 +- 0.24% | 2,166 | +0.44 | 5.7 |
+| backprop, 2 x 128 hidden | 97.92 +- 0.16% | 121,899 | +0.22 | 23.7 |
+| ours, 2 x 128 hidden (`threshold_target=0.08`) | 97.49 +- 0.20% | 87,213 | +0.22 | 32.1 |
 
 Network SOPs = synaptic operations per test image caused by hidden and output
 spikes (input spikes are identical for every model). Faithfulness margin =
@@ -78,6 +80,8 @@ batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
 | SGD momentum 0.9 (lr 0.2) instead of plain SGD (lr 2.0) | small gain, converges ~40% sooner | 01 |
 | metabolic energy E with the spiking read-out (v0-era) | required for learning at all: without it the hidden layer saturates at the maximum rate | 01 |
 | batch size 256 | 33% faster per epoch at equal accuracy (1 seed; needs a backprop control at 256) | 05 |
+| `threshold_target=0.08` at 2 x 128 hidden | depth-matched gap -0.91 pt -> -0.43 pt, 29% fewer SOPs, faithfulness recovers to bp parity. Depth-specific; do not apply at 1 x 128 | db02b |
+| sync-batched metric reductions (`metric_sync_batched=true`) | ~28% faster real-loop s/epoch, bitwise-identical model. No learning-rule change | db03 |
 
 The energy weight `mu` is an accuracy-sparsity dial, not an accuracy lever
 (3 seeds, 128 hidden, no floor):
@@ -109,24 +113,44 @@ neurons).
 | firing-rate floor as a fix for silent wide networks | does not reach silent neurons (the surrogate derivative is ~0 far below threshold) | 03 |
 | 100 epochs instead of 50 | no gain (saturated) | 05 |
 | within noise (single seed): lr 0.1 / 0.3 / 0.5, momentum 0.8 / 0.95, KP decay 3e-4, feedback scale 0.5 / 2, barrier weight 1e-3 / 0.1, surrogate slope 5 / 10 / 40, LR patience 3 / 10, membrane time constant 5 / 20 steps, batch 64, adaptive-threshold target 2-5% | no reliable change | 02, 03, 05 |
+| `threshold_target` sweep at T=10 (0.02 / 0.08 vs 0.05) | all three tie by validation (within 0.01 pt); mean test deltas +0.10/+0.11 pt within noise. Set-point is not the T=10 bottleneck | db01c |
+| `threshold_target=0.02` at 2 x 128 hidden | counter-intuitive: lower target produces HIGHER hidden rate (0.30 -> 0.35), -0.22 pt test, 19% more SOPs, worse faithfulness. The threshold servo at depth is sign-flipped from the naive reading | db02b |
 
 ## Open problems and untried directions
 
-1. **Training cost.** Our step has ~3 ms of fixed, T-independent overhead
-   (potential terms, Kolen-Pollack and threshold updates, many small
-   kernels). Profiling and fusing it is the most direct route to the
-   efficiency front.
+1. **Training cost.** Partially closed in db03: sync-batching metric reductions
+   drops real-loop s/epoch ~28%. The T-independent kernel-launch overhead
+   is still there under the covers (`cost_benchmark.py` sees ~1% delta from
+   the patch because the benchmark preloads data and skips end-of-step
+   bookkeeping). Next: profile where the remaining ~4 s per real epoch
+   actually goes (`db03b`); candidate target is kernel fusion in `potential/*`.
 2. **Fair energy comparison.** Backprop has no sparsity pressure. A backprop
    run with a spike-count penalty, swept, would put both models on one
    accuracy vs SOPs curve.
-3. **Deeper networks.** With one hidden layer, input-layer events dominate the
-   total. Two or more hidden layers (broadcast feedback to each) is where
-   hidden sparsity cuts total synaptic events, and tests whether the rule
-   scales in depth.
-4. **Short windows.** The gap is largest at T = 10 (-0.5 pt).
+3. **Deeper networks.** Partial progress in db02 / db02b: at 2 x 128, bp beats
+   ng by 0.91 pt with the 1-layer config; raising `threshold_target` to 0.08
+   closes the gap to 0.43 pt and recovers a 29% SOP advantage. The remaining
+   -0.43 pt looks like a credit-flow problem, not a firing-rate one: current
+   Kolen-Pollack feeds only the last hidden layer, so the first hidden layer
+   gets no feedback-aligned signal. Next: `db02c` broadcasts KP to every
+   hidden layer; `db02d` adds per-layer `threshold_target`.
+4. **Short windows.** db01c ruled `threshold_target` out as the cause of the
+   T = 10 gap (all three settings tie on validation). The sweet-spot at T = 25
+   that doesn't carry down to T = 10 is now more consistent with a feedback-
+   alignment mismatch (Kolen-Pollack decay) than a homeostatic one. Next:
+   `db01d` sweeps `feedback_decay` at T = 10. Also: `threshold_target=0.02`
+   at T = 10 improves faithfulness from 0.47 to 0.52 at no accuracy cost —
+   an explainability-focused variant for the paper narrative.
 5. **Faithfulness at width.** Remove a fixed fraction of hidden neurons
    instead of 64 so the test is meaningful at 1024 hidden.
 6. **Other datasets.** Nothing has been run beyond MNIST yet.
+7. **Environment reproducibility.** On Windows + WDDM, a sleep/wake event can
+   degrade the GPU driver state and cause a 10-15x per-epoch slowdown on an
+   individual run (observed in db01c on first launch and once in db02b/db03
+   mid-batch). The slowdown does not change model output (seeds are
+   deterministic), so disregard these as wall-clock outliers rather than
+   model variance. If reproducing a batch, keep the machine awake for the
+   full duration.
 
 ## Experiment protocol
 
