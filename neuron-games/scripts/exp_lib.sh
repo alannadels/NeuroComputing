@@ -177,9 +177,15 @@ batch_finish() {
         [ ${#BATCH_FAILED[@]} -eq 0 ]; return
     fi
     echo
-    echo "[batch $BATCH_ID] controlled cost benchmark"
-    "$PY" scripts/cost_benchmark.py "$BATCH_DIR" --device "$EXP_DEVICE" > "$BATCH_DIR/cost_benchmark.log" 2>&1 \
-        || echo "[batch] cost benchmark failed (see cost_benchmark.log)"
+    if [ "${EXP_SKIP_BENCH:-0}" = "1" ]; then
+        # Batches running side by side would disturb each other's timings; run
+        # scripts/cost_benchmark.py on the batch afterwards, then exp_report.py again.
+        echo "[batch $BATCH_ID] cost benchmark skipped (EXP_SKIP_BENCH=1)"
+    else
+        echo "[batch $BATCH_ID] controlled cost benchmark"
+        "$PY" scripts/cost_benchmark.py "$BATCH_DIR" --device "$EXP_DEVICE" > "$BATCH_DIR/cost_benchmark.log" 2>&1 \
+            || echo "[batch] cost benchmark failed (see cost_benchmark.log)"
+    fi
     echo "[batch $BATCH_ID] generating report"
     "$PY" scripts/exp_report.py "$BATCH_DIR" || echo "[batch] report generation failed"
     echo "[batch $BATCH_ID] done: $((BATCH_N - ${#BATCH_FAILED[@]}))/$BATCH_N experiments succeeded"
