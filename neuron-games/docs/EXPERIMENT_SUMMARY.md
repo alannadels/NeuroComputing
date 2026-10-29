@@ -1,4 +1,4 @@
-# Experiment summary (batches 01-09, 2026-10-21 to 2026-10-28)
+# Experiment summary (batches 01-09 and jh01, 2026-10-21 to 2026-10-29)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
@@ -73,6 +73,21 @@ identifies the neurons that matter).
 | efficiency | **won** (batches 07-08): training step 28% faster than backprop (5.5 vs 7.6 ms at batch 256), 18% faster per epoch end to end, 26% less training energy; 33% faster with two hidden layers, 24% faster at 1024 hidden; per-step tie at T = 10 (still 9% faster per epoch). Costs: +18% peak training memory at 128 hidden, +53% at 1024; inference latency tied. Both models share the same Python-loop forward pass, so a compiled implementation could change the ratio |
 | explainability | mixed: unpenalized, our credit is far more faithful (25% margin +0.40 vs +0.04; credit vs single-neuron removal rank correlation 0.86 vs 0.57). Under the energy penalty backprop concentrates its computation in few neurons, which its credit then identifies better (rho 0.93 vs 0.84-0.88); our sparse network spreads computation and is more robust to random neuron loss (91.4% vs 89.5% after removing 25%; 81.5% vs 75.3% on Fashion-MNIST) (batch 09) |
 
+### Fashion-MNIST (batch jh01, 3 seeds, 128 hidden)
+
+| configuration | test acc | val acc | network SOPs / img | faithfulness margin | train ms / step |
+|---|---|---|---|---|---|
+| backprop, leaky read-out | 88.15 +- 0.11% | 89.68 +- 0.20% | 7,322 | +0.20 | 13.4 |
+| ours, MNIST best | 87.29 +- 0.17% | 88.83 +- 0.20% | 2,072 | +0.23 | 14.7 |
+| **ours, MNIST best with lr 0.1** | **87.53 +- 0.19%** | **89.16 +- 0.25%** | **2,414** | **+0.28** | 14.7 |
+
+The gap to backprop grows from -0.1 pt (MNIST) to -0.6 pt. Our method
+underfits (training accuracy ~89-90%, equal to validation) while backprop
+overfits (~93.5% training), so the remaining gap is a fitting problem; width is
+the next lever. Validation accuracy also drifts down 0.5-1.8 pt from its best
+by epoch 50 for our runs (backprop: at most 0.5 pt). Full analysis: batch
+jh01 in `EXPERIMENT_LOG.md` (local log on the machine that ran it).
+
 Progress of the best result at 128 hidden: v0 94.19% (gap -3.4 pt) ->
 batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
 -0.1 pt) -> batch 07 97.59% at batch 256 (gap -0.04 pt, tied).
@@ -128,6 +143,8 @@ backprop and is withdrawn.
 | lowering the adaptive-threshold target to 2% (or turning thresholds off) when the energy penalty is on | +0.6 pt at mu 2.5e-5 (96.78% -> 97.42%), +1.4 pt at mu 1e-4; puts ours above penalized backprop at high sparsity | 08 |
 | energy penalty (mu 5e-6) on a two-hidden-layer network with direct feedback | +0.8 pt over mu 0 (96.51% vs 95.67%), both layers ~5% firing, 26% fewer total SOPs than backprop; still -1.3 pt vs backprop | 07 |
 | batch size 256 (both models) | 34-36% faster per epoch for both, accuracy unchanged for both (97.59% ours, 97.67% backprop); per-epoch time then ties with backprop (4.67 vs 4.68 s) | 05, 06 |
+| lr 0.1 instead of 0.2 on Fashion-MNIST | +0.33 pt val, positive on all 3 seeds, +16% network SOPs | jh01 |
+| rate floor + adaptive thresholds on Fashion-MNIST | removing both costs -1.9 pt val / -2.4 pt test (no effect on MNIST); hidden firing falls to 2.6% | jh01 |
 
 The energy weight `mu` is an accuracy-sparsity dial, not an accuracy lever
 (3 seeds, 128 hidden, no floor):
@@ -161,6 +178,7 @@ neurons).
 | two hidden layers (784-128-128-10) with fixed random direct feedback to the first layer and Kolen-Pollack on the second | 96.53% (batch 128) / 95.67% (batch 256) vs backprop 97.8%; first layer stays dense (36% rate), more hidden-to-hidden SOPs than backprop. The first layer needs an aligned signal | 06, 07 |
 | layer-wise Kolen-Pollack without normalization, or with the default hidden decay | 94.89% (neither fix, batch 07); 95.42% (decay fix only); 97.25% with late collapse (normalization only). Use both fixes (see "What worked") | 07, 08 |
 | adaptive thresholds at a 5% target together with the energy penalty | the thresholds fight the penalty: -0.6 to -1.4 pt | 07, 08 |
+| `mu` as a sparsity dial on Fashion-MNIST | weaker than on MNIST: `mu=5e-6` cuts network SOPs 13% (MNIST 45%) for -0.4 pt val; `mu=2.5e-5` cuts 42% for -1.1 pt val (1 seed each) | jh01 |
 | within noise (single seed): lr 0.1 / 0.3 / 0.5, momentum 0.8 / 0.95, KP decay 3e-4, feedback scale 0.5 / 2, barrier weight 1e-3 / 0.1, surrogate slope 5 / 10 / 40, LR patience 3 / 10, membrane time constant 5 / 20 steps, batch 64, adaptive-threshold target 2-5% | no reliable change | 02, 03, 05 |
 
 ## Open problems and untried directions
@@ -182,9 +200,14 @@ neurons).
    comparison.
 4. **Short windows and width.** Accuracy gaps at T = 10 (-0.35 pt) and 1024
    hidden (-0.4 pt), single seed at batch 256.
-5. **Fashion-MNIST** (batch 09, no retuning): ours -0.75 pt vs backprop
-   (dense); +0.95 pt vs penalized backprop at its default lr (not tuned there
-   yet, so not a claim).
+5. **Fashion-MNIST.** Ours -0.6 to -0.75 pt vs backprop (jh01 at batch 128,
+   batch 09 at batch 256). jh01: our method underfits (training accuracy ~89-90%,
+   equal to validation) while backprop overfits (~93.5%), so the gap is a
+   fitting problem; lr 0.1 helps (+0.33 pt val); the late validation drift of
+   item 0 appears here too (0.5-1.8 pt). Batch 09: +0.95 pt vs penalized
+   backprop at its default lr (not tuned on Fashion-MNIST yet, so not a claim).
+   Planned (jh02): width 256 / 512, lr 0.05, LR patience 3, threshold target
+   0.08, KP decay 3e-4.
 
 
 ## Experiment protocol
