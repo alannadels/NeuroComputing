@@ -160,9 +160,10 @@ def main(argv=None) -> int:
             cfg, net = _load(d, device)
             step = _train_stepper(cfg, net, device)
             train_batches = train_sets[batch_of[d.name]]
+            nt = len(train_batches)          # datasets with fewer batches than warmup + steps cycle through them
             for i in range(args.warmup):
-                step(*train_batches[i])
-            wall, e, mem = _measure(lambda i: step(*train_batches[args.warmup + i]), args.steps, device, meter)
+                step(*train_batches[i % nt])
+            wall, e, mem = _measure(lambda i: step(*train_batches[(args.warmup + i) % nt]), args.steps, device, meter)
             s = samples[d.name]
             s["train_ms"].append(1000 * wall / args.steps)
             s["train_us_img"].append(1e6 * wall / (args.steps * batch_of[d.name]))
