@@ -3,7 +3,7 @@
 # backprop SNN (bp_snn): same network, data split, encoding, loss and seeds.
 #
 # Usage (from anywhere; paths resolve to neuron-games/):
-#   scripts/run_comparison.sh [--dataset mnist|fashion_mnist|cifar10|cifar100] [--epochs N] [--seeds "1"]
+#   scripts/run_comparison.sh [--dataset mnist|fashion_mnist|cifar10|cifar100|tiny_imagenet] [--epochs N] [--seeds "1"]
 #                             [--models "bp_snn ng_snn"] [--device cuda|mps|cpu]
 #                             [--out runs/compare-<dataset>-<ts>] [--first-seed-only]
 #                             [--skip-tests] [--skip-explain]

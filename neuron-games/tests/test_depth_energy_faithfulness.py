@@ -358,3 +358,33 @@ def test_network_size_follows_dataset(name, shape) -> None:
 def test_explicit_sizes_still_win() -> None:
     cfg = NGRunConfig.for_condition("bp_anchor", dataset="cifar10", n_in=12, n_out=4)
     assert (cfg.n_in, cfg.n_out) == (12, 4)
+
+
+def test_tiny_imagenet_loader_reads_train_and_val_layout(tmp_path) -> None:
+    """Builds a two-class Tiny ImageNet tree and checks labels, shapes and the cache."""
+    from PIL import Image
+    import numpy as np
+    from neuron_games.data import TinyImageNet
+    base = tmp_path / "tiny-imagenet-200"
+    rng = np.random.default_rng(0)
+    for c in ("n02", "n01"):
+        d = base / "train" / c / "images"
+        d.mkdir(parents=True)
+        for k in range(3):
+            Image.fromarray(rng.integers(0, 255, (64, 64, 3), dtype=np.uint8)).save(d / f"{c}_{k}.JPEG")
+    (base / "val" / "images").mkdir(parents=True)
+    Image.fromarray(rng.integers(0, 255, (64, 64), dtype=np.uint8)).save(base / "val" / "images" / "val_0.JPEG")
+    (base / "val" / "val_annotations.txt").write_text("val_0.JPEG\tn02\t0\t0\t63\t63\n")
+    train = TinyImageNet(tmp_path, "train", download=False)
+    val = TinyImageNet(tmp_path, "val", download=False)
+    assert train.classes == ["n01", "n02"] and len(train) == 6 and len(val) == 1
+    x, y = val[0]
+    assert x.shape == (3, 64, 64) and 0.0 <= float(x.min()) and float(x.max()) <= 1.0 and y == 1  # grayscale -> RGB
+    assert sorted(int(t) for t in train.targets) == [0, 0, 0, 1, 1, 1]
+    assert (tmp_path / "tiny-imagenet-200-train.pt").is_file()
+    assert len(TinyImageNet(tmp_path, "train", download=False)) == 6        # served from the cache
+
+
+def test_tiny_imagenet_network_size() -> None:
+    cfg = NGRunConfig.for_condition("tf_div_energy", dataset="tiny_imagenet")
+    assert (cfg.n_in, cfg.n_out) == (12288, 200)

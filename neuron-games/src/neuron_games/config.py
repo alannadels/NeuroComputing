@@ -54,14 +54,17 @@ DIVERSITY_KERNELS = ("mci", "vanrossum", "binned", "count", "schoenberg")
 METABOLIC = ("none", "basic")
 BARRIERS = ("none", "quadratic", "log")
 CREDIT = ("none", "eligibility_shapley", "shapley_taylor")
-DATASETS = ("MNIST", "FashionMNIST", "CIFAR10", "CIFAR100")
+DATASETS = ("MNIST", "FashionMNIST", "CIFAR10", "CIFAR100", "TinyImageNet")
 DATASET_ALIASES = {"mnist": "MNIST", "fashion_mnist": "FashionMNIST",
                    "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST",
                    "cifar10": "CIFAR10", "cifar-10": "CIFAR10", "cifar_10": "CIFAR10",
-                   "cifar100": "CIFAR100", "cifar-100": "CIFAR100", "cifar_100": "CIFAR100"}
-# (inputs, classes) per dataset: 28x28 grayscale or 32x32x3 RGB images, flattened.
+                   "cifar100": "CIFAR100", "cifar-100": "CIFAR100", "cifar_100": "CIFAR100",
+                   "tiny_imagenet": "TinyImageNet", "tinyimagenet": "TinyImageNet",
+                   "tiny-imagenet": "TinyImageNet", "tiny_imagenet_200": "TinyImageNet",
+                   "imagenet200": "TinyImageNet"}
+# (inputs, classes) per dataset: 28x28 grayscale, 32x32x3 or 64x64x3 RGB images, flattened.
 DATASET_SHAPES = {"MNIST": (784, 10), "FashionMNIST": (784, 10),
-                  "CIFAR10": (3072, 10), "CIFAR100": (3072, 100)}
+                  "CIFAR10": (3072, 10), "CIFAR100": (3072, 100), "TinyImageNet": (12288, 200)}
 
 
 def canonical_dataset(name: str) -> str:
@@ -88,8 +91,8 @@ class NGRunConfig:
                                           # leaky-integrator read-out (membrane = logits)
 
     # --- Input / task (J) ---
-    dataset: str = "MNIST"                # MNIST | FashionMNIST | CIFAR10 | CIFAR100
-                                          # (aliases: mnist, fashion_mnist, cifar10, cifar100)
+    dataset: str = "MNIST"                # MNIST | FashionMNIST | CIFAR10 | CIFAR100 | TinyImageNet
+                                          # (aliases: mnist, fashion_mnist, cifar10, cifar100, tiny_imagenet)
     num_steps: int = 25                   # T: one adaptation window = one presentation
     encoding: str = "rate"                # rate (Bernoulli) | direct (same pixels each step)
     task_loss: str = "ce_rate"            # ce_rate (mean_t CE on spk[t]) | ce_count (CE on spike counts)
