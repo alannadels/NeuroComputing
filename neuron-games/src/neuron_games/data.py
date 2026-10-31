@@ -2,7 +2,8 @@
 
 MNIST and Fashion-MNIST are 28x28 grayscale (784 inputs, 10 classes); CIFAR-10
 and CIFAR-100 are 32x32 RGB (3072 inputs, 10 / 100 classes); Tiny ImageNet is
-64x64 RGB (12288 inputs, 200 classes). The network's
+64x64 RGB (12288 inputs, 200 classes); Mini-ImageNet is resized to 84x84 RGB
+(21168 inputs, 100 classes). The network's
 input and output sizes follow the dataset (config.DATASET_SHAPES). MNIST goes
 through `neuron_baseline.data.build_loaders` unmodified; every other dataset
 reuses the same seeded train/val split and loader settings, so all are
@@ -18,6 +19,14 @@ as is standard, the official 10,000-image validation set serves as our test
 set, and our validation split is carved from the 100,000 training images as
 for every other dataset. The JPEGs are decoded once and cached as uint8
 tensors next to the data (tiny-imagenet-200-<split>.pt).
+
+Mini-ImageNet: the timm/mini-imagenet release on Hugging Face (100 classes;
+train / validation / test = 50,000 / 10,000 / 5,000 images at original
+resolution; ImageNet research terms). Its train split is ours (validation
+carved from it as for every dataset) and its test split is our test set; its
+validation split is not used. Images are resized to the standard 84x84 once and
+cached (mini-imagenet-84-<split>.pt); every downloaded file is checked against
+its published SHA-256. Reading the files needs pyarrow.
 """
 from __future__ import annotations
 
@@ -88,6 +97,89 @@ class TinyImageNet(Dataset):
         return self.data[i].float().div_(255.0), int(self.targets[i])
 
 
+MINI_REPO = "https://huggingface.co/datasets/timm/mini-imagenet"
+MINI_API = "https://huggingface.co/api/datasets/timm/mini-imagenet/tree/main/data"
+MINI_SIZE = 84
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _download_mini_split(root: Path, split: str) -> list[Path]:
+    """Fetch every parquet shard of one split (skipping verified ones); return their paths."""
+    import json
+    import urllib.request
+    files = [f for f in json.load(urllib.request.urlopen(MINI_API, timeout=60))
+             if f["path"].split("/")[-1].startswith(split + "-")]
+    if not files:
+        raise RuntimeError(f"no {split} shards listed at {MINI_API}")
+    out_dir = root / "mini-imagenet"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for f in sorted(files, key=lambda f: f["path"]):
+        dest = out_dir / f["path"].split("/")[-1]
+        sha = f["lfs"]["oid"]
+        if not (dest.is_file() and dest.stat().st_size == f["size"] and _sha256(dest) == sha):
+            tmp = dest.with_suffix(".part")
+            print(f"[data] downloading {dest.name} ({f['size'] / 2**20:.0f} MiB)", flush=True)
+            urllib.request.urlretrieve(f"{MINI_REPO}/resolve/main/{f['path']}", tmp)
+            if _sha256(tmp) != sha:
+                tmp.unlink()
+                raise RuntimeError(f"checksum mismatch for {dest.name}")
+            tmp.rename(dest)
+        paths.append(dest)
+    return paths
+
+
+class MiniImageNet(Dataset):
+    """Mini-ImageNet (timm/mini-imagenet), split "train" (50,000) or "test" (5,000),
+    resized to 84x84. Items are ([3, 84, 84] float in [0, 1], class index)."""
+
+    def __init__(self, root: str | Path, split: str = "train", download: bool = True):
+        if split not in ("train", "test"):
+            raise ValueError(f"unknown Mini-ImageNet split {split!r}")
+        root = Path(root)
+        cache = root / f"mini-imagenet-{MINI_SIZE}-{split}.pt"
+        if cache.is_file():
+            self.data, self.targets = torch.load(cache)
+            return
+        if not download and not any((root / "mini-imagenet").glob(f"{split}-*.parquet")):
+            raise RuntimeError(f"Mini-ImageNet not found under {root}; pass download=True")
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as e:
+            raise ImportError("Mini-ImageNet needs pyarrow (pip install pyarrow)") from e
+        import io
+        import numpy as np
+        from PIL import Image
+        shards = (_download_mini_split(root, split) if download
+                  else sorted((root / "mini-imagenet").glob(f"{split}-*.parquet")))
+        data, targets = [], []
+        for shard in shards:
+            table = pq.read_table(shard)
+            images, labels = table.column("image").to_pylist(), table.column("label").to_pylist()
+            for img, y in zip(images, labels):
+                with Image.open(io.BytesIO(img["bytes"])) as im:
+                    im = im.convert("RGB").resize((MINI_SIZE, MINI_SIZE), Image.BILINEAR)
+                    data.append(torch.from_numpy(np.asarray(im).copy()).permute(2, 0, 1))
+                targets.append(int(y))
+        self.data = torch.stack(data)
+        self.targets = torch.tensor(targets, dtype=torch.long)
+        torch.save((self.data, self.targets), cache)
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, i: int):
+        return self.data[i].float().div_(255.0), int(self.targets[i])
+
+
 def build_loaders(dataset: str, data_dir: str | Path, batch_size: int, eval_batch_size: int,
                   val_size: int, seed: int, num_workers: int = 0, pin_memory: bool = True,
                   download: bool = True) -> dict[str, DataLoader]:
@@ -101,6 +193,9 @@ def build_loaders(dataset: str, data_dir: str | Path, batch_size: int, eval_batc
     if name == "TinyImageNet":
         full_train = TinyImageNet(data_dir, "train", download=download)
         test_ds = TinyImageNet(data_dir, "val", download=download)
+    elif name == "MiniImageNet":
+        full_train = MiniImageNet(data_dir, "train", download=download)
+        test_ds = MiniImageNet(data_dir, "test", download=download)
     else:
         ds = DATASETS[name]
         tf = TRANSFORMS[name]

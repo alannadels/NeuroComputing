@@ -388,3 +388,34 @@ def test_tiny_imagenet_loader_reads_train_and_val_layout(tmp_path) -> None:
 def test_tiny_imagenet_network_size() -> None:
     cfg = NGRunConfig.for_condition("tf_div_energy", dataset="tiny_imagenet")
     assert (cfg.n_in, cfg.n_out) == (12288, 200)
+
+
+def test_mini_imagenet_reads_parquet_shards(tmp_path) -> None:
+    """Builds two tiny parquet shards in the timm/mini-imagenet layout and checks resizing, labels, cache."""
+    pa = pytest.importorskip("pyarrow")
+    import io
+    import numpy as np
+    import pyarrow.parquet as pq
+    from PIL import Image
+    from neuron_games.data import MiniImageNet
+    d = tmp_path / "mini-imagenet"
+    d.mkdir()
+    rng = np.random.default_rng(0)
+
+    def png(h, w):
+        b = io.BytesIO()
+        Image.fromarray(rng.integers(0, 255, (h, w, 3), dtype=np.uint8)).save(b, format="PNG")
+        return {"bytes": b.getvalue(), "path": None}
+    for k, labels in enumerate(([3, 7], [1])):
+        tbl = pa.table({"image": [png(100 + i, 120) for i in range(len(labels))], "label": labels})
+        pq.write_table(tbl, d / f"train-0000{k}-of-00002.parquet")
+    ds = MiniImageNet(tmp_path, "train", download=False)
+    assert len(ds) == 3 and [int(t) for t in ds.targets] == [3, 7, 1]
+    x, y = ds[0]
+    assert x.shape == (3, 84, 84) and y == 3 and 0.0 <= float(x.min()) and float(x.max()) <= 1.0
+    assert (tmp_path / "mini-imagenet-84-train.pt").is_file()
+
+
+def test_mini_imagenet_network_size() -> None:
+    cfg = NGRunConfig.for_condition("bp_anchor", dataset="mini_imagenet")
+    assert (cfg.n_in, cfg.n_out) == (21168, 100)
