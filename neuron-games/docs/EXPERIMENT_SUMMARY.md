@@ -1,4 +1,4 @@
-# Experiment summary (batches 01-05 and jh01, 2026-10-21 to 2026-10-27)
+# Experiment summary (batches 01-05, jh01, jh02, 2026-10-21 to 2026-10-30)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
@@ -62,20 +62,36 @@ identifies the neurons that matter).
 | efficiency | training step ~20% slower than backprop (+60% at T = 10), ~20 MiB more training memory, inference latency tied |
 | explainability | credit ~3x more faithful than for backprop at 128 hidden (+0.36 vs +0.13); both near 0 at 1024 hidden (64 removed neurons is too few to matter there) |
 
-### Fashion-MNIST (batch jh01, 3 seeds, 128 hidden)
+### Fashion-MNIST (batches jh01-jh02, 3 seeds unless noted)
 
 | configuration | test acc | val acc | network SOPs / img | faithfulness margin | train ms / step |
 |---|---|---|---|---|---|
 | backprop, leaky read-out | 88.15 +- 0.11% | 89.68 +- 0.20% | 7,322 | +0.20 | 13.4 |
 | ours, MNIST best | 87.29 +- 0.17% | 88.83 +- 0.20% | 2,072 | +0.23 | 14.7 |
-| **ours, MNIST best with lr 0.1** | **87.53 +- 0.19%** | **89.16 +- 0.25%** | **2,414** | **+0.28** | 14.7 |
+| ours, MNIST best with lr 0.1 | 87.53 +- 0.19% | 89.16 +- 0.25% | 2,414 | +0.28 | 14.7 |
+| **ours, lr 0.1, KP decay 3e-4** | **87.95 +- 0.10%** | **89.31 +- 0.21%** | **2,367** | **+0.27** | 15.0 |
+| backprop, 256 hidden (1 seed) | 88.17% | 90.00% | 12,390 | +0.16 | 13.5 |
+| ours, lr 0.1, 256 hidden (1 seed) | 87.97% | 89.78% | 4,010 | +0.09 | 14.9 |
+| backprop, 512 hidden (1 seed) | 88.50% | 90.10% | 23,512 | +0.08 | 13.5 |
+| ours, lr 0.1, 512 hidden (1 seed) | 88.33% | 89.70% | 7,129 | +0.19 | 15.2 |
 
-The gap to backprop grows from -0.1 pt (MNIST) to -0.6 pt. Our method
-underfits (training accuracy ~89-90%, equal to validation) while backprop
-overfits (~93.5% training), so the remaining gap is a fitting problem; width is
-the next lever. Validation accuracy also drifts down 0.5-1.8 pt from its best
-by epoch 50 for our runs (backprop: at most 0.5 pt). Full analysis: batch
-jh01 in `EXPERIMENT_LOG.md` (local log on the machine that ran it).
+The gap to backprop is -0.2 pt test / -0.4 pt val with the best setting
+(MNIST: -0.1 pt). Our method underfits (training accuracy ~89-91%, close to
+validation) while backprop overfits (~93.5% training). Width helps our method
+more than backprop (single seed: test gap -0.6 -> -0.2 pt at 256 hidden).
+
+**Kolen-Pollack decay is not scaled by the learning rate.** Our validation
+and training accuracy drift down 0.5-2 pt after their best epoch (backprop:
+at most 0.5 pt). Cause: `kolen_pollack_` decays W_out and B by
+`feedback_decay` every step, independent of the LR; after the plateau schedule
+cuts the LR, the updates no longer balance the decay and the output-weight
+norm falls by half or more between the best and the last checkpoint (base:
+6.1 -> 2.1; backprop grows 11.1 -> 12.5). Anything that lowers the LR sooner
+(lr 0.05, LR patience 3) is hurt the most, weaker decay helps. This likely
+affects every KP result, including MNIST ("100 epochs: no gain"). An
+LR-scaled decay is a candidate next batch (not run yet). Full analysis:
+batches jh01 and jh02 in `EXPERIMENT_LOG.md` (local log on the machine that
+ran it).
 
 Progress of the best result at 128 hidden: v0 94.19% (gap -3.4 pt) ->
 batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
@@ -94,6 +110,7 @@ batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
 | metabolic energy E with the spiking read-out (v0-era) | required for learning at all: without it the hidden layer saturates at the maximum rate | 01 |
 | batch size 256 | 33% faster per epoch at equal accuracy (1 seed; needs a backprop control at 256) | 05 |
 | lr 0.1 instead of 0.2 on Fashion-MNIST | +0.33 pt val, positive on all 3 seeds, +16% network SOPs | jh01 |
+| KP decay 3e-4 instead of 1e-3 on Fashion-MNIST | +0.15 pt val (positive on all 3 seeds), +0.42 pt test; weaker decay also halves the late drift (see the KP note above) | jh02 |
 | rate floor + adaptive thresholds on Fashion-MNIST | removing both costs -1.9 pt val / -2.4 pt test (no effect on MNIST); hidden firing falls to 2.6% | jh01 |
 
 The energy weight `mu` is an accuracy-sparsity dial, not an accuracy lever
@@ -125,6 +142,8 @@ neurons).
 | KP decay above 1e-3 (3e-3, 5e-3, 1e-2) | -0.3 to -0.8 pt | 05 |
 | firing-rate floor as a fix for silent wide networks | does not reach silent neurons (the surrogate derivative is ~0 far below threshold) | 03 |
 | 100 epochs instead of 50 | no gain (saturated) | 05 |
+| lr 0.05 / LR patience 3 on Fashion-MNIST | -0.6 / -1.4 pt val (1 seed each); both lower the LR sooner relative to the unscaled KP decay, so retest after the decay fix | jh02 |
+| adaptive threshold target 0.08 on Fashion-MNIST | -0.4 pt val, +22% network SOPs (1 seed) | jh02 |
 | `mu` as a sparsity dial on Fashion-MNIST | weaker than on MNIST: `mu=5e-6` cuts network SOPs 13% (MNIST 45%) for -0.4 pt val; `mu=2.5e-5` cuts 42% for -1.1 pt val (1 seed each) | jh01 |
 | within noise (single seed): lr 0.1 / 0.3 / 0.5, momentum 0.8 / 0.95, KP decay 3e-4, feedback scale 0.5 / 2, barrier weight 1e-3 / 0.1, surrogate slope 5 / 10 / 40, LR patience 3 / 10, membrane time constant 5 / 20 steps, batch 64, adaptive-threshold target 2-5% | no reliable change | 02, 03, 05 |
 
@@ -144,9 +163,11 @@ neurons).
 4. **Short windows.** The gap is largest at T = 10 (-0.5 pt).
 5. **Faithfulness at width.** Remove a fixed fraction of hidden neurons
    instead of 64 so the test is meaningful at 1024 hidden.
-6. **Other datasets.** Fashion-MNIST (jh01): gap -0.6 pt, underfitting;
-   next: width 256 / 512, lr 0.05, LR patience 3, threshold target 0.08,
-   KP decay 3e-4 (planned as jh02). Nothing beyond Fashion-MNIST yet.
+6. **Other datasets.** Fashion-MNIST (jh01-jh02): gap -0.2 pt test /
+   -0.4 pt val, underfitting; candidates: LR-scaled KP decay, width 256 on
+   3 seeds. Nothing beyond Fashion-MNIST yet.
+7. **LR-scaled Kolen-Pollack decay.** See the KP note under Fashion-MNIST;
+   needs a check on the MNIST best configuration before it becomes default.
 
 ## Experiment protocol
 
