@@ -54,9 +54,12 @@ DIVERSITY_KERNELS = ("mci", "vanrossum", "binned", "count", "schoenberg")
 METABOLIC = ("none", "basic")
 BARRIERS = ("none", "quadratic", "log")
 CREDIT = ("none", "eligibility_shapley", "shapley_taylor")
-DATASETS = ("MNIST", "FashionMNIST")          # 28x28 grayscale, 10 classes (proposal §12.1)
+DATASETS = ("MNIST", "FashionMNIST", "CIFAR10")  # 10 classes each (proposal §12.1)
 DATASET_ALIASES = {"mnist": "MNIST", "fashion_mnist": "FashionMNIST",
-                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST"}
+                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST",
+                   "cifar10": "CIFAR10", "cifar-10": "CIFAR10", "cifar_10": "CIFAR10"}
+# Flattened input size per dataset: 28x28 grayscale, or 32x32 RGB for CIFAR-10.
+DATASET_N_IN = {"MNIST": 784, "FashionMNIST": 784, "CIFAR10": 3 * 32 * 32}
 
 
 def canonical_dataset(name: str) -> str:
@@ -87,7 +90,8 @@ class NGRunConfig:
                                           # leaky-integrator read-out (membrane = logits)
 
     # --- Input / task (J) ---
-    dataset: str = "MNIST"                # MNIST | FashionMNIST (aliases: mnist, fashion_mnist)
+    dataset: str = "MNIST"                # MNIST | FashionMNIST | CIFAR10 (aliases: mnist,
+                                          # fashion_mnist, cifar10); n_in follows the dataset
     num_steps: int = 25                   # T: one adaptation window = one presentation
     encoding: str = "rate"                # rate (Bernoulli) | direct (same pixels each step)
     task_loss: str = "ce_rate"            # ce_rate (mean_t CE on spk[t]) | ce_count (CE on spike counts)
@@ -193,6 +197,10 @@ class NGRunConfig:
                 raise ValueError(f"unknown {name} {value!r}; known: {list(allowed)}")
 
         self.dataset = canonical_dataset(self.dataset)
+        # n_in defaults to 784; a CIFAR-10 run gets 3072 without an explicit override.
+        # Any other n_in is left alone (unit tests build small networks).
+        if self.n_in == 784:
+            self.n_in = DATASET_N_IN[self.dataset]
         if self.condition not in CONDITIONS:
             raise ValueError(f"unknown condition {self.condition!r}; known: {sorted(CONDITIONS)}")
         _check("encoding", self.encoding, ("rate", "direct"))

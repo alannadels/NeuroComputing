@@ -1,6 +1,7 @@
 """Image -> spike-train input encodings.
 
-Images arrive from `neuron_baseline.data` as [B, 1, 28, 28] in [0, 1].
+Images arrive from `data.py` as [B, C, H, W] in [0, 1] ([B, 1, 28, 28] for
+(Fashion-)MNIST, [B, 3, 32, 32] for CIFAR-10) and are flattened to [B, n_in].
 """
 from __future__ import annotations
 

@@ -245,3 +245,10 @@ def test_build_net_passes_hidden_sizes_from_config() -> None:
     net = build_net(cfg)
     assert net.hidden_sizes == (9, 7)
     assert [layer.fc.out_features for layer in net.layers] == [9, 7, 4]
+
+
+def test_cifar10_config_sets_input_size() -> None:
+    from neuron_games.config import NGRunConfig
+    cfg = NGRunConfig.for_condition("bp_anchor", dataset="cifar10")
+    assert cfg.dataset == "CIFAR10" and cfg.n_in == 3072
+    assert NGRunConfig.for_condition("bp_anchor", dataset="fashion_mnist").n_in == 784
