@@ -128,6 +128,19 @@ def test_kolen_pollack_gap_shrinks_exactly() -> None:
     torch.testing.assert_close(fb.B[0] - w, 0.95 * gap_before)
 
 
+def test_kolen_pollack_only_moves_last_hidden_feedback() -> None:
+    # Equal-width hidden layers give every B the shape of W_out; only the last moves.
+    from neuron_games.modulator.random_feedback import RandomFeedback
+    fb = RandomFeedback([6, 6, 4], seed=0)
+    b0 = fb.B[0].clone()
+    w_before = torch.randn(4, 6)
+    w = w_before + 0.1 * torch.randn(4, 6)
+    gap_before = fb.B[1] - w_before
+    fb.kolen_pollack_(w, w_before, decay=0.05)
+    torch.testing.assert_close(fb.B[0], b0)
+    torch.testing.assert_close(fb.B[1] - w, 0.95 * gap_before)
+
+
 def test_kolen_pollack_aligns_feedback_without_backprop() -> None:
     torch.manual_seed(0)
     n_in, C, T = 40, 3, 20

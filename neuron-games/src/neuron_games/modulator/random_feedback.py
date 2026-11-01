@@ -48,12 +48,14 @@ class RandomFeedback:
     @torch.no_grad()
     def kolen_pollack_(self, w_out: torch.Tensor, w_out_before: torch.Tensor, decay: float) -> None:
         """Apply one Kolen-Pollack step, given the output weights after and before
-        this step's update. Decays W_out in place and moves every B the same way."""
+        this step's update. Decays W_out in place and moves the last hidden layer's
+        B the same way. Earlier B's stay fixed: with equal-width hidden layers they
+        have the same shape as W_out, so matching on shape would update them too."""
         delta = w_out - w_out_before                  # the update the output layer took
         w_out.sub_(decay * w_out_before)              # W' = (1 - d) W_before + dW
-        for i, b in enumerate(self.B):
-            if b.shape == delta.shape:                # B for the last hidden layer
-                self.B[i] = (1.0 - decay) * b + delta
+        b = self.B[-1]                                # B for the last hidden layer
+        if b.shape == delta.shape:
+            self.B[-1] = (1.0 - decay) * b + delta
 
     def alignment(self, w_out: torch.Tensor) -> float | None:
         """Cosine similarity between the last hidden layer's B and W_out."""
