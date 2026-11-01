@@ -150,8 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = NGRunConfig.for_condition(condition, **overrides)
     if args.mode == "validate":
         keys = ("learning_rule", "readout", "feedback", "feedback_decay", "diversity", "metabolic",
-                "barrier", "mu", "lr", "momentum", "n_hidden", "num_steps", "threshold_adapt",
-                "rate_floor", "credit", "credit_modulates", "seed", "epochs")
+                "barrier", "mu", "lr", "momentum", "n_in", "n_hidden", "hidden_sizes", "num_steps",
+                "threshold_adapt", "rate_floor", "credit", "credit_modulates", "seed", "epochs")
         print("VALID " + json.dumps({k: getattr(cfg, k) for k in keys}))
         return 0
     if not cfg.run_dir:
