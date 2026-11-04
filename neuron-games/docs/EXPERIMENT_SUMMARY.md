@@ -1,4 +1,4 @@
-# Experiment summary (batches 01-09 and jh01, 2026-10-21 to 2026-10-29)
+# Experiment summary (batches 01-09, five-dataset overview, jh01-jh02; 2026-10-21 to 2026-11-03)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
@@ -26,29 +26,51 @@ not meaningful. Everything marked "3 seeds" is mean +- std over seeds 1-3.
 ## Current best configuration
 
 ```bash
-python scripts/run_snn.py --model tf_div_energy \
-  --set diversity=none --set mu=0 --set momentum=0.9 --set lr=0.2 \
-  --set readout=leaky --set feedback=kolen_pollack --set feedback_decay=1e-3 \
+python scripts/run_snn.py --model tf_div_energy --dataset <dataset> \
+  --set diversity=none --set mu=0 --set momentum=0.9 --set lr=<lr> \
+  --set readout=leaky --set feedback=kolen_pollack --set feedback_decay=1e-4 \
   --set rate_floor=0.01 --set threshold_adapt=true --set threshold_target=0.05 \
   --set batch_size=256
 ```
 
-In words: three-factor rule, leaky (non-spiking) read-out, Kolen-Pollack
-feedback, SGD momentum 0.9 at lr 0.2, quadratic barrier on, metabolic energy
-weight 0, diversity V off, firing-rate floor 0.01, adaptive thresholds with a
-5% target rate. Dropping `rate_floor` and the threshold settings gives the same
-test accuracy (97.56% vs 97.54%) with fewer settings.
+Learning rate chosen by validation per dataset: 0.2 (MNIST), 0.1
+(Fashion-MNIST), 0.02 (CIFAR-10, Tiny ImageNet), 0.05 (CIFAR-100). The
+Kolen-Pollack decay of 1e-4 (was 1e-3) is the key change of the five-dataset
+overview: it stops the output weights from shrinking late in training.
 
-Sparse variant (batch 08): add `--set mu=2.5e-5 --set threshold_target=0.02`
-(97.42% at 777 network SOPs) or `--set mu=1e-4 --set threshold_adapt=false`
-(97.09% at 467). With the energy penalty on, the 5% threshold target must be
-lowered or switched off; it fights the penalty.
+Sparse variant (comparison 2): `--set mu=1e-4 --set threshold_adapt=false
+--set trace_mode=reverse`, learning rate 0.2 / 0.1 / 0.02 / 0.02 / 0.01 on the
+five datasets above (in that order: MNIST, Fashion-MNIST, CIFAR-10, CIFAR-100,
+Tiny ImageNet).
 
-Two hidden layers (batch 08): add `--set n_hidden_layers=2 --set feedback_path=layerwise
---set feedback_normalize=true --set feedback_decay_hidden=1e-4 --set mu=5e-6`
-(97.58 +- 0.04% vs backprop 97.83 +- 0.13%).
+Two hidden layers: add `--set n_hidden_layers=2 --set feedback_path=layerwise
+--set feedback_normalize=true --set feedback_decay_hidden=1e-4 --set mu=5e-6`.
 
-## Where we stand (3 seeds)
+## Five-dataset overview (latest; 5 seeds, test accuracy)
+
+Same 128-hidden LIF network, T = 25, 50 epochs, batch 256; every model's
+learning rate chosen by validation on each dataset (backprop's grids extended
+until the best rate was inside them). Comparison 1: standard backprop vs ours
+(dense). Comparison 2: backprop trained with the same energy term (mu 1e-4) vs
+ours (sparse).
+
+| dataset | backprop | ours (dense) | backprop + energy | ours (sparse) |
+|---|---|---|---|---|
+| MNIST | 97.63 +- 0.03% | **97.75 +- 0.06%** | 97.07 +- 0.09% | 97.15 +- 0.11% |
+| Fashion-MNIST | 88.40 +- 0.18% | 88.35 +- 0.11% | 88.02 +- 0.16% | 88.09 +- 0.15% |
+| CIFAR-10 | 49.61 +- 0.30% | **51.39 +- 0.29%** | 45.28 +- 0.68% | **47.47 +- 0.93%** |
+| CIFAR-100 | 20.35 +- 0.68% | **24.29 +- 0.31%** | 11.52 +- 1.34% | **18.91 +- 0.19%** |
+| Tiny ImageNet | 6.68 +- 0.17% | **10.97 +- 0.33%** | 1.37 +- 1.11% | **7.14 +- 0.25%** |
+
+Ahead or tied in every comparison. Training step 25-42% faster than either
+backprop variant on the first four datasets (6-15% on Tiny ImageNet, where
+the input layer dominates); peak training memory +3-18%. On CIFAR-100 and Tiny
+ImageNet backprop is still improving at 50 epochs (open problem 3). Full
+tables: `docs/experiments/results_five_datasets_2026-11-03.tex`.
+
+## MNIST history (batches 05-09, Kolen-Pollack decay 1e-3, 3 seeds)
+
+Superseded by the five-dataset overview above; kept for the record of how each front developed.
 
 | configuration | test acc | network SOPs / img | faithfulness margin | train ms / step |
 |---|---|---|---|---|
@@ -73,20 +95,36 @@ identifies the neurons that matter).
 | efficiency | **won** (batches 07-08): training step 28% faster than backprop (5.5 vs 7.6 ms at batch 256), 18% faster per epoch end to end, 26% less training energy; 33% faster with two hidden layers, 24% faster at 1024 hidden; per-step tie at T = 10 (still 9% faster per epoch). Costs: +18% peak training memory at 128 hidden, +53% at 1024; inference latency tied. Both models share the same Python-loop forward pass, so a compiled implementation could change the ratio |
 | explainability | mixed: unpenalized, our credit is far more faithful (25% margin +0.40 vs +0.04; credit vs single-neuron removal rank correlation 0.86 vs 0.57). Under the energy penalty backprop concentrates its computation in few neurons, which its credit then identifies better (rho 0.93 vs 0.84-0.88); our sparse network spreads computation and is more robust to random neuron loss (91.4% vs 89.5% after removing 25%; 81.5% vs 75.3% on Fashion-MNIST) (batch 09) |
 
-### Fashion-MNIST (batch jh01, 3 seeds, 128 hidden)
+### Fashion-MNIST (batches jh01-jh02, 3 seeds unless noted)
 
 | configuration | test acc | val acc | network SOPs / img | faithfulness margin | train ms / step |
 |---|---|---|---|---|---|
 | backprop, leaky read-out | 88.15 +- 0.11% | 89.68 +- 0.20% | 7,322 | +0.20 | 13.4 |
 | ours, MNIST best | 87.29 +- 0.17% | 88.83 +- 0.20% | 2,072 | +0.23 | 14.7 |
-| **ours, MNIST best with lr 0.1** | **87.53 +- 0.19%** | **89.16 +- 0.25%** | **2,414** | **+0.28** | 14.7 |
+| ours, MNIST best with lr 0.1 | 87.53 +- 0.19% | 89.16 +- 0.25% | 2,414 | +0.28 | 14.7 |
+| **ours, lr 0.1, KP decay 3e-4** | **87.95 +- 0.10%** | **89.31 +- 0.21%** | **2,367** | **+0.27** | 15.0 |
+| backprop, 256 hidden (1 seed) | 88.17% | 90.00% | 12,390 | +0.16 | 13.5 |
+| ours, lr 0.1, 256 hidden (1 seed) | 87.97% | 89.78% | 4,010 | +0.09 | 14.9 |
+| backprop, 512 hidden (1 seed) | 88.50% | 90.10% | 23,512 | +0.08 | 13.5 |
+| ours, lr 0.1, 512 hidden (1 seed) | 88.33% | 89.70% | 7,129 | +0.19 | 15.2 |
 
-The gap to backprop grows from -0.1 pt (MNIST) to -0.6 pt. Our method
-underfits (training accuracy ~89-90%, equal to validation) while backprop
-overfits (~93.5% training), so the remaining gap is a fitting problem; width is
-the next lever. Validation accuracy also drifts down 0.5-1.8 pt from its best
-by epoch 50 for our runs (backprop: at most 0.5 pt). Full analysis: batch
-jh01 in `EXPERIMENT_LOG.md` (local log on the machine that ran it).
+The gap to backprop is -0.2 pt test / -0.4 pt val with the best setting
+(MNIST: -0.1 pt). Our method underfits (training accuracy ~89-91%, close to
+validation) while backprop overfits (~93.5% training). Width helps our method
+more than backprop (single seed: test gap -0.6 -> -0.2 pt at 256 hidden).
+
+**Kolen-Pollack decay is not scaled by the learning rate.** Our validation
+and training accuracy drift down 0.5-2 pt after their best epoch (backprop:
+at most 0.5 pt). Cause: `kolen_pollack_` decays W_out and B by
+`feedback_decay` every step, independent of the LR; after the plateau schedule
+cuts the LR, the updates no longer balance the decay and the output-weight
+norm falls by half or more between the best and the last checkpoint (base:
+6.1 -> 2.1; backprop grows 11.1 -> 12.5). Anything that lowers the LR sooner
+(lr 0.05, LR patience 3) is hurt the most, weaker decay helps. This likely
+affects every KP result, including MNIST ("100 epochs: no gain"). An
+LR-scaled decay is a candidate next batch (not run yet). Full analysis:
+batches jh01 and jh02 in `EXPERIMENT_LOG.md` (local log on the machine that
+ran it).
 
 Progress of the best result at 128 hidden: v0 94.19% (gap -3.4 pt) ->
 batch 01 94.2% -> batch 02 95.62% -> batch 03 96.21% -> batch 05 97.54% (gap
@@ -131,6 +169,8 @@ backprop and is withdrawn.
 
 | change | effect | batch |
 |---|---|---|
+| Kolen-Pollack decay 1e-4 instead of 1e-3 (both of our configurations) | Fashion-MNIST -0.56 pt -> tie, CIFAR-10 tie -> +1.8 pt, MNIST tie -> +0.12 pt vs backprop; training accuracy matches backprop, the late decline mostly disappears, seed variance drops (CIFAR-10 +-1.5 -> +-0.2). 3e-4 helps too (jh02) | variant batches, five-dataset overview |
+| learning rate chosen by validation per dataset, for every model | the MNIST rate (0.2) diverges on CIFAR-10; screened rates 0.1 / 0.02 / 0.05 / 0.02 | screens |
 | leaky (non-spiking) read-out **together with** Kolen-Pollack feedback | +1.4 pt; either one alone hurts (see below). With KP, cos(B, W_out) reaches 1.00 within ~2 epochs | 02 |
 | removing diversity V (once leaky + KP are on) | +0.6 pt, 35% fewer SOPs, more faithful credit, 11% cheaper step | 03 |
 | energy weight `mu` lowered to 0 | +1.4 pt (96.20% -> 97.56%), at 4x the SOPs of `mu=2.5e-5` | 05 |
@@ -144,6 +184,7 @@ backprop and is withdrawn.
 | energy penalty (mu 5e-6) on a two-hidden-layer network with direct feedback | +0.8 pt over mu 0 (96.51% vs 95.67%), both layers ~5% firing, 26% fewer total SOPs than backprop; still -1.3 pt vs backprop | 07 |
 | batch size 256 (both models) | 34-36% faster per epoch for both, accuracy unchanged for both (97.59% ours, 97.67% backprop); per-epoch time then ties with backprop (4.67 vs 4.68 s) | 05, 06 |
 | lr 0.1 instead of 0.2 on Fashion-MNIST | +0.33 pt val, positive on all 3 seeds, +16% network SOPs | jh01 |
+| KP decay 3e-4 instead of 1e-3 on Fashion-MNIST | +0.15 pt val (positive on all 3 seeds), +0.42 pt test; weaker decay also halves the late drift (see the KP note above) | jh02 |
 | rate floor + adaptive thresholds on Fashion-MNIST | removing both costs -1.9 pt val / -2.4 pt test (no effect on MNIST); hidden firing falls to 2.6% | jh01 |
 
 The energy weight `mu` is an accuracy-sparsity dial, not an accuracy lever
@@ -178,36 +219,43 @@ neurons).
 | two hidden layers (784-128-128-10) with fixed random direct feedback to the first layer and Kolen-Pollack on the second | 96.53% (batch 128) / 95.67% (batch 256) vs backprop 97.8%; first layer stays dense (36% rate), more hidden-to-hidden SOPs than backprop. The first layer needs an aligned signal | 06, 07 |
 | layer-wise Kolen-Pollack without normalization, or with the default hidden decay | 94.89% (neither fix, batch 07); 95.42% (decay fix only); 97.25% with late collapse (normalization only). Use both fixes (see "What worked") | 07, 08 |
 | adaptive thresholds at a 5% target together with the energy penalty | the thresholds fight the penalty: -0.6 to -1.4 pt | 07, 08 |
+| lr 0.05 / LR patience 3 on Fashion-MNIST | -0.6 / -1.4 pt val (1 seed each); both lower the LR sooner relative to the unscaled KP decay, so retest after the decay fix | jh02 |
+| adaptive threshold target 0.08 on Fashion-MNIST | -0.4 pt val, +22% network SOPs (1 seed) | jh02 |
+| cosine learning-rate schedule (Fashion-MNIST, CIFAR-10, 3 seeds) | -0.1 to -0.7 pt and a larger late decline than the plateau schedule | variant batches |
+| adaptive-threshold target 8% (Fashion-MNIST, CIFAR-10, 3 seeds) | no gain | variant batches |
+| three hidden layers on Fashion-MNIST / CIFAR-10 (layer-wise KP, normalized) | -1.9 / -4.1 pt vs backprop; the first layer stays dense, as on MNIST | overnight |
 | `mu` as a sparsity dial on Fashion-MNIST | weaker than on MNIST: `mu=5e-6` cuts network SOPs 13% (MNIST 45%) for -0.4 pt val; `mu=2.5e-5` cuts 42% for -1.1 pt val (1 seed each) | jh01 |
 | within noise (single seed): lr 0.1 / 0.3 / 0.5, momentum 0.8 / 0.95, KP decay 3e-4, feedback scale 0.5 / 2, barrier weight 1e-3 / 0.1, surrogate slope 5 / 10 / 40, LR patience 3 / 10, membrane time constant 5 / 20 steps, batch 64, adaptive-threshold target 2-5% | no reliable change | 02, 03, 05 |
 
 ## Open problems and untried directions
 
-0. **Late-training decline (most direct accuracy lever).** In many of our runs
-   validation accuracy peaks early (sometimes by epoch 8-10) and then falls
-   (to ~95.6% by epoch 50); backprop does not do this. Best checkpoints are
-   reported, so early peaks cost test accuracy. Cause not yet found. A cosine
-   schedule damps it slightly (+0.2 pt).
-1. **Training cost.** Faster than backprop except at T = 10 (per-step tie);
-   the remaining overhead is the barrier (~0.8 ms) and floor (~0.4 ms) terms.
-   Training memory at 1024 hidden is +53%.
-2. **Depth.** Two hidden layers work (-0.25 pt); three do not (-1.25 pt, batch
-   09): the first layer stays dense (46%) and its update is ~20x backprop's,
-   because the normalization compounds over chained layers.
-3. **Reverse-time traces** (`trace_mode=reverse`) save memory (+7% instead of
-   +18% vs backprop) with identical gradients, but dense runs with it peaked
-   early in all 3 seeds (97.30% vs 97.59%); not adopted until a larger seed
-   comparison.
-4. **Short windows and width.** Accuracy gaps at T = 10 (-0.35 pt) and 1024
-   hidden (-0.4 pt), single seed at batch 256.
-5. **Fashion-MNIST.** Ours -0.6 to -0.75 pt vs backprop (jh01 at batch 128,
-   batch 09 at batch 256). jh01: our method underfits (training accuracy ~89-90%,
-   equal to validation) while backprop overfits (~93.5%), so the gap is a
-   fitting problem; lr 0.1 helps (+0.33 pt val); the late validation drift of
-   item 0 appears here too (0.5-1.8 pt). Batch 09: +0.95 pt vs penalized
-   backprop at its default lr (not tuned on Fashion-MNIST yet, so not a claim).
-   Planned (jh02): width 256 / 512, lr 0.05, LR patience 3, threshold target
-   0.08, KP decay 3e-4.
+0. **Late-training decline: largely fixed.** Cause: the Kolen-Pollack decay is
+   applied every step, independent of the learning rate, so once the plateau
+   schedule cuts the rate the output weights shrink (jh02 analysis). A decay of
+   1e-4 instead of 1e-3 removes most of the drift on every dataset and is now
+   the default (five-dataset overview). An LR-scaled decay would remove the
+   dependence entirely (not run yet).
+1. **Depth.** Two hidden layers trail backprop by 0.3-1.4 pt, three by 1.9-4.1
+   pt (MNIST, Fashion-MNIST, CIFAR-10): the per-layer normalization of the
+   chained feedback signal compounds and over-drives the first layer, which
+   stays dense. Needs a fix before larger or convolutional networks.
+2. **Credit quality.** Credit vs single-neuron removal: ours ahead on MNIST
+   (0.85 vs 0.59) and CIFAR-100 (0.94 vs 0.91), behind on Fashion-MNIST,
+   CIFAR-10 and Tiny ImageNet (0.76-0.88 vs 0.91-0.95). Not yet diagnosed.
+3. **Training budget.** On CIFAR-100 and Tiny ImageNet backprop's validation
+   accuracy is still rising at 50 epochs (its best learning rates are small);
+   ours levels off sooner. Longer runs would show how much of the gap remains.
+4. **Cost at large inputs.** On Tiny ImageNet (12,288 inputs) the input layer
+   dominates both models: our step is only 6-15% faster and training energy is
+   tied. Peak training memory is +3-18% on every dataset.
+5. **Width.** Ties backprop at 512 / 1024 on Fashion-MNIST and at 512 on
+   CIFAR-10; -1.1 pt at 1024 on CIFAR-10.
+6. **Reverse-time traces** (`trace_mode=reverse`, less memory, same gradients)
+   are used for the sparse configuration; not adopted for the dense one until
+   a larger seed comparison.
+7. **ImageNet-1k / convolutional layers.** The rule has no convolutional layers
+   yet (weight sharing needs an extension of the eligibility traces and of
+   Kolen-Pollack). Required for competitive ImageNet-scale results.
 
 
 ## Experiment protocol
