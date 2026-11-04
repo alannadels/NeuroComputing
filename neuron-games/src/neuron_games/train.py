@@ -362,7 +362,7 @@ def train(cfg: NGRunConfig, loaders: dict, device: torch.device, run_dir: Path) 
               f"train_loss={history['epoch_train_loss'][-1]:.4f} "
               f"train_acc={history['epoch_train_acc'][-1]:.4f} "
               f"val_loss={val['loss']:.4f} val_acc={val['accuracy']:.4f} "
-              f"phi_ref={ref['phi']:.4f} rate(h,o)=({rates[0]:.3f},{rates[-1]:.3f}) "
+              f"phi_ref={ref['phi']:.4f} rate(h,o)=({','.join(f'{r:.3f}' for r in rates)}) "
               f"lr={schedule.lr:.4g} time(train,val)=({train_s:.1f}s,{val_s:.2f}s){mem_log}")
         if schedule.step(val["accuracy"]):
             print(f"[lr] no val improvement for {cfg.lr_patience} epochs: "
