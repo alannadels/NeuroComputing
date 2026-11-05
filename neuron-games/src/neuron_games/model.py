@@ -1,4 +1,4 @@
-"""784-128-10 fully-connected LIF network with a vendored LIF cell.
+"""Fully-connected LIF network (784-128-10 by default, optionally deeper) with a vendored LIF cell.
 
 Vendored rather than subclassing `snn.Leaky` (plan §8, decision 8): the
 three-factor rule (Workstream A) needs the membrane potential, the surrogate
@@ -128,6 +128,11 @@ class SNNRecord:
     h: list[torch.Tensor] | None = None
     readout: str = "spike"                      # "spike" | "leaky"
     hidden_spike_steps: list[torch.Tensor] | None = None   # per-step hidden spikes (retain_spike_grads)
+    # trace_mode="reverse": eps is not stored; the presynaptic input of every
+    # layer (x_seq, then the previous layer's spikes) and each layer's alpha are
+    # kept instead, and learning_rule.py forms the same update in reverse time.
+    trace_inputs: list[torch.Tensor] | None = None
+    alphas: list[float] | None = None
 
     @property
     def out(self) -> torch.Tensor:
@@ -142,28 +147,30 @@ class SNNRecord:
 
     @property
     def has_traces(self) -> bool:
-        return self.eps is not None and self.h is not None
+        return self.h is not None and (self.eps is not None or self.trace_inputs is not None)
 
 
 class FCSNN(nn.Module):
     """n_in -> hidden_sizes[0] -> ... -> hidden_sizes[-1] -> n_out, LIF everywhere.
 
-    Default is one hidden layer of size `n_hidden` (unchanged for every existing
-    caller). Pass `hidden_sizes=(h1, h2, ...)` for a deeper network: it ignores
-    `n_hidden` and builds LIFLayers along `[n_in, h1, h2, ..., n_out]`. Every
-    hidden layer gets adaptive_threshold when requested; only the output layer
-    switches to a leaky integrator when `readout="leaky"`.
+    Default is `n_hidden_layers` hidden layers of size `n_hidden` (one layer of
+    size `n_hidden` out of the box, so every existing caller keeps the same
+    784-128-n_out network). Pass `hidden_sizes=(h1, h2, ...)` for a non-uniform
+    hidden stack: it overrides both `n_hidden` and `n_hidden_layers` and builds
+    LIFLayers along `[n_in, h1, h2, ..., n_out]`. Only the output layer switches
+    to a leaky integrator when `readout="leaky"`; adaptive_threshold applies to
+    hidden layers only.
     """
 
     def __init__(self, n_in: int = 784, n_hidden: int = 128, n_out: int = 10,
                  alpha: float = 0.905, threshold: float = 1.0,
                  surrogate_slope: float = 25.0, bias: bool = False, readout: str = "spike",
-                 adaptive_threshold: bool = False,
+                 adaptive_threshold: bool = False, n_hidden_layers: int = 1,
                  hidden_sizes: tuple[int, ...] = ()):
         super().__init__()
         if readout not in ("spike", "leaky"):
             raise ValueError(f"unknown readout {readout!r}")
-        hidden = tuple(hidden_sizes) if hidden_sizes else (n_hidden,)
+        hidden = tuple(hidden_sizes) if hidden_sizes else tuple([n_hidden] * n_hidden_layers)
         if any(h <= 0 for h in hidden):
             raise ValueError(f"hidden sizes must be positive, got {hidden}")
         kw = dict(alpha=alpha, threshold=threshold,
@@ -189,12 +196,16 @@ class FCSNN(nn.Module):
 
     def forward(self, x_seq: torch.Tensor, record_traces: bool = False,
                 masks: list[torch.Tensor | None] | None = None,
-                record_inputs: bool = False, retain_spike_grads: bool = False) -> SNNRecord:
+                record_inputs: bool = False, retain_spike_grads: bool = False,
+                trace_mode: str = "forward") -> SNNRecord:
         """x_seq: [T, B, n_in]. State starts at zero on every call.
 
         record_traces: also record eps / h (see SNNRecord), written into
             preallocated [T, ...] tensors. Used by the three-factor rule;
             costs O(T * B * fan_in) memory per layer.
+        trace_mode: "forward" stores eps; "reverse" stores no eps (the update is
+            formed from the inputs the forward pass keeps anyway, see
+            learning_rule.py), saving that memory.
         record_inputs: also record each layer's input (rec.inp). Only tests
             need it; training does not, so it is off by default.
         retain_spike_grads: keep the hidden layer's per-step spike tensors with
@@ -210,10 +221,11 @@ class FCSNN(nn.Module):
         spk: list[list[torch.Tensor]] = [[] for _ in self.layers]
         mem: list[list[torch.Tensor]] = [[] for _ in self.layers]
         fan_in = [layer.fc.in_features for layer in self.layers]
-        n_out = [layer.fc.out_features for layer in self.layers]
-        if record_traces:
+        if trace_mode not in ("forward", "reverse"):
+            raise ValueError(f"unknown trace_mode {trace_mode!r}")
+        store_eps = record_traces and trace_mode == "forward"
+        if store_eps:
             eps_buf = [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in]
-            h_buf = [torch.empty(T, B, n, device=dev, dtype=dt) for n in n_out]
         if record_inputs:
             inp_buf = [None] + [torch.empty(T, B, f, device=dev, dtype=dt) for f in fan_in[1:]]
 
@@ -228,14 +240,12 @@ class FCSNN(nn.Module):
                 if retain_spike_grads and l == 0 and s.requires_grad:
                     s.retain_grad()
                     hidden_steps.append(s)
-                if record_traces:            # traces are constants for the learning rule
+                if store_eps:                # traces are constants for the learning rule
                     x_d = inp.detach()
                     if t == 0:
                         eps_buf[l][0].copy_(x_d)
                     else:
                         torch.add(x_d, eps_buf[l][t - 1], alpha=layer.alpha, out=eps_buf[l][t])
-                    h_buf[l][t] = fast_sigmoid_grad(u.detach() - layer.thr,
-                                                    layer.surrogate_slope)
                 if record_inputs and l > 0:
                     inp_buf[l][t] = inp.detach()
                 states[l] = (u, s)
@@ -248,7 +258,15 @@ class FCSNN(nn.Module):
         if retain_spike_grads:
             rec.hidden_spike_steps = hidden_steps
         if record_traces:
-            rec.eps, rec.h = eps_buf, h_buf
+            # h depends only on u[t], so it is computed for the whole window at
+            # once (same values as per step; far fewer kernel launches).
+            if store_eps:
+                rec.eps = eps_buf
+            else:
+                rec.trace_inputs = [x_seq.detach()] + [s.detach() for s in rec.spk[:-1]]
+                rec.alphas = [layer.alpha for layer in self.layers]
+            rec.h = [fast_sigmoid_grad(m.detach() - layer.thr, layer.surrogate_slope)
+                     for m, layer in zip(rec.mem, self.layers)]
         if record_inputs:
             rec.inp = [x_seq] + inp_buf[1:]      # layer 0's input is x_seq itself (no copy)
         return rec
@@ -261,4 +279,5 @@ def build_net(cfg) -> FCSNN:
                  surrogate_slope=cfg.surrogate_slope, bias=cfg.bias,
                  readout=getattr(cfg, "readout", "spike"),
                  adaptive_threshold=getattr(cfg, "threshold_adapt", False),
+                 n_hidden_layers=getattr(cfg, "n_hidden_layers", 1),
                  hidden_sizes=hidden_sizes)

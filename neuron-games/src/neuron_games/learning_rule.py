@@ -65,6 +65,33 @@ def eligibility_grad(drive: torch.Tensor, eps: torch.Tensor) -> torch.Tensor:
     return drive.reshape(-1, n_out).transpose(0, 1) @ eps.reshape(-1, n_in)
 
 
+_FILTERS: dict = {}
+
+
+def reverse_filter(drive: torch.Tensor, alpha: float) -> torch.Tensor:
+    """d~[k] = sum_{t >= k} alpha^(t - k) drive[t], [T, B, N], as one matmul.
+
+    Identity used by trace_mode="reverse": with eps[t] = sum_{k <= t}
+    alpha^(t - k) x[k],
+
+        sum_t drive[t]^T eps[t] = sum_k d~[k]^T x[k],
+
+    so the three-factor update can be formed from the presynaptic input x
+    itself, without storing eps. Same update, same quantities (no gradient
+    through the network or its dynamics); only the order of the sum changes.
+    """
+    T = drive.shape[0]
+    key = (T, float(alpha), drive.device, drive.dtype)
+    A = _FILTERS.get(key)
+    if A is None:
+        i = torch.arange(T, device=drive.device)
+        lag = (i.unsqueeze(0) - i.unsqueeze(1)).to(drive.dtype)        # A[k, t] = alpha^(t - k), t >= k
+        A = torch.where(lag >= 0, torch.tensor(float(alpha), dtype=drive.dtype, device=drive.device) ** lag,
+                        torch.zeros((), dtype=drive.dtype, device=drive.device))
+        _FILTERS[key] = A
+    return (A @ drive.reshape(T, -1)).reshape(drive.shape)
+
+
 def layer_grad(rec: SNNRecord, l: int, sig: LayerSignals,
                like: torch.Tensor) -> torch.Tensor:
     """dC/dW_l from one layer's signals. `like` gives shape/dtype/device."""
@@ -73,7 +100,10 @@ def layer_grad(rec: SNNRecord, l: int, sig: LayerSignals,
     g = torch.zeros_like(like)
     drive = membrane_drive(sig, rec.h[l])
     if drive is not None:
-        g = g + eligibility_grad(drive, rec.eps[l])
+        if rec.eps is not None:
+            g = g + eligibility_grad(drive, rec.eps[l])
+        else:                                   # trace_mode="reverse": same sum, reordered
+            g = g + eligibility_grad(reverse_filter(drive, rec.alphas[l]), rec.trace_inputs[l])
     if sig.weight is not None:
         g = g + sig.weight
     return g

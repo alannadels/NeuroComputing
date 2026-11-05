@@ -54,9 +54,17 @@ DIVERSITY_KERNELS = ("mci", "vanrossum", "binned", "count", "schoenberg")
 METABOLIC = ("none", "basic")
 BARRIERS = ("none", "quadratic", "log")
 CREDIT = ("none", "eligibility_shapley", "shapley_taylor")
-DATASETS = ("MNIST", "FashionMNIST")          # 28x28 grayscale, 10 classes (proposal §12.1)
+DATASETS = ("MNIST", "FashionMNIST", "CIFAR10", "CIFAR100", "TinyImageNet")
 DATASET_ALIASES = {"mnist": "MNIST", "fashion_mnist": "FashionMNIST",
-                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST"}
+                   "fashionmnist": "FashionMNIST", "fmnist": "FashionMNIST",
+                   "cifar10": "CIFAR10", "cifar-10": "CIFAR10", "cifar_10": "CIFAR10",
+                   "cifar100": "CIFAR100", "cifar-100": "CIFAR100", "cifar_100": "CIFAR100",
+                   "tiny_imagenet": "TinyImageNet", "tinyimagenet": "TinyImageNet",
+                   "tiny-imagenet": "TinyImageNet", "tiny_imagenet_200": "TinyImageNet",
+                   "imagenet200": "TinyImageNet"}
+# (inputs, classes) per dataset: 28x28 grayscale, 32x32x3 or 64x64x3 RGB images, flattened.
+DATASET_SHAPES = {"MNIST": (784, 10), "FashionMNIST": (784, 10),
+                  "CIFAR10": (3072, 10), "CIFAR100": (3072, 100), "TinyImageNet": (12288, 200)}
 
 
 def canonical_dataset(name: str) -> str:
@@ -70,14 +78,14 @@ def canonical_dataset(name: str) -> str:
 class NGRunConfig:
     condition: str = "bp_anchor"
 
-    # --- Network: 784-128-10 fully-connected LIF (plan §1, §1.5) ---
-    n_in: int = 784
+    # --- Network: n_in-128-n_out fully-connected LIF (plan §1, §1.5) ---
+    n_in: int = 0                         # 0: from the dataset (784 for MNIST / Fashion-MNIST, 3072 for CIFAR)
     n_hidden: int = 128
-    n_out: int = 10
-    # Optional multi-hidden-layer override. Empty tuple (default) means one hidden
-    # layer of size n_hidden, so every existing config and test keeps the same
-    # 784-n_hidden-n_out network. A non-empty tuple like (128, 128) builds a
-    # 784-128-128-n_out network and ignores n_hidden. See model.layer_hidden_sizes().
+    n_hidden_layers: int = 1              # hidden LIF layers of n_hidden neurons each
+    n_out: int = 0                        # 0: the dataset's number of classes (10, or 100 for CIFAR-100)
+    # Optional non-uniform hidden stack. Empty tuple (default) means n_hidden_layers
+    # layers of n_hidden. A non-empty tuple like (128, 128) overrides n_hidden and
+    # n_hidden_layers and builds a 784-128-128-n_out network. See model.FCSNN.
     hidden_sizes: tuple[int, ...] = ()
     alpha: float = math.exp(-1.0 / 10.0)  # membrane decay, tau_m = 10 steps
     threshold: float = 1.0
@@ -87,7 +95,8 @@ class NGRunConfig:
                                           # leaky-integrator read-out (membrane = logits)
 
     # --- Input / task (J) ---
-    dataset: str = "MNIST"                # MNIST | FashionMNIST (aliases: mnist, fashion_mnist)
+    dataset: str = "MNIST"                # MNIST | FashionMNIST | CIFAR10 | CIFAR100 | TinyImageNet
+                                          # (aliases: mnist, fashion_mnist, cifar10, cifar100, tiny_imagenet)
     num_steps: int = 25                   # T: one adaptation window = one presentation
     encoding: str = "rate"                # rate (Bernoulli) | direct (same pixels each step)
     task_loss: str = "ce_rate"            # ce_rate (mean_t CE on spk[t]) | ce_count (CE on spike counts)
@@ -99,6 +108,19 @@ class NGRunConfig:
                                           # update as the output weights, both decay by
                                           # feedback_decay per step, so B -> W_out (local, no backprop)
     feedback_decay: float = 1e-4          # kolen_pollack only: per-step decay of B and W_out
+    feedback_path: str = "direct"         # several hidden layers: direct (every hidden layer gets the
+                                          # output error through its own B) | layerwise (layer l gets
+                                          # layer l+1's signal through B_l, which tracks W_{l+1});
+                                          # identical with one hidden layer
+    feedback_decay_hidden: float = -1.0   # layerwise + kolen_pollack: decay for the hidden pairs
+                                          # (B_l, W_{l+1}), l < last; < 0 = same as feedback_decay.
+                                          # 0: B_l only accumulates W_{l+1}'s updates, W_{l+1} never decays
+    trace_mode: str = "forward"           # forward: store eligibility traces eps | reverse: same
+                                          # update from the stored inputs (learning_rule.reverse_filter),
+                                          # no eps buffers (less memory)
+    feedback_normalize: bool = False      # layerwise: divide each chained signal by the next layer's
+                                          # mean surrogate derivative (one scalar gain per layer and
+                                          # window) so it does not shrink with depth
     feedback_seed_offset: int = 7919      # B is drawn from seed + offset, independent of W init
 
     # --- V: diversity (proposal §5) ---
@@ -162,7 +184,8 @@ class NGRunConfig:
     # LR schedule, identical for every model: halve the learning rate once val
     # accuracy has gone lr_patience epochs without a new best (counter then
     # resets); never below lr * lr_min_factor. "none" keeps it constant.
-    lr_schedule: str = "plateau"          # plateau | none
+    lr_schedule: str = "plateau"          # plateau | cosine (lr * (f + (1 - f) * (1 + cos(pi e / E)) / 2),
+                                          # f = lr_min_factor, after epoch e of E) | none
     lr_factor: float = 0.5
     lr_patience: int = 5
     lr_min_factor: float = 1.0 / 64.0
@@ -200,6 +223,11 @@ class NGRunConfig:
                 raise ValueError(f"unknown {name} {value!r}; known: {list(allowed)}")
 
         self.dataset = canonical_dataset(self.dataset)
+        d_in, d_out = DATASET_SHAPES[self.dataset]
+        if self.n_in <= 0:
+            self.n_in = d_in
+        if self.n_out <= 0:
+            self.n_out = d_out
         if self.condition not in CONDITIONS:
             raise ValueError(f"unknown condition {self.condition!r}; known: {sorted(CONDITIONS)}")
         _check("encoding", self.encoding, ("rate", "direct"))
@@ -213,15 +241,25 @@ class NGRunConfig:
         _check("barrier", self.barrier, BARRIERS)
         _check("credit", self.credit, CREDIT)
         _check("credit_layers", self.credit_layers, ("hidden", "all"))
-        _check("lr_schedule", self.lr_schedule, ("plateau", "none"))
         _check("readout", self.readout, ("spike", "leaky"))
         _check("feedback", self.feedback, ("random", "kolen_pollack"))
+        _check("feedback_path", self.feedback_path, ("direct", "layerwise"))
+        _check("trace_mode", self.trace_mode, ("forward", "reverse"))
+        if self.trace_mode == "reverse" and self.diversity != "none":
+            raise ValueError("diversity V reads the eligibility traces; use trace_mode=forward")
+        _check("lr_schedule", self.lr_schedule, ("plateau", "cosine", "none"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
-        if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"
+        if self.learning_rule == "bptt" and (self.diversity != "none"
                                              or self.barrier != "none" or self.credit != "none"
                                              or self.rate_floor > 0.0 or self.threshold_adapt):
-            raise ValueError("V / E / credit terms are only wired into the three_factor rule")
+            # The metabolic energy E_met is allowed: BPTT then minimizes J + mu * E_met
+            # with autograd (a spike-count penalty), so both models can be compared
+            # at matched sparsity.
+            raise ValueError("V / barrier / floor / threshold / credit terms are only wired "
+                             "into the three_factor rule")
+        if self.n_hidden_layers < 1:
+            raise ValueError("n_hidden_layers must be >= 1")
         if self.threshold_adapt and self.diversity != "none" and self.diversity_feature == "plasticity_signature":
             raise ValueError("plasticity_signature diversity assumes a fixed threshold")
         if self.credit_modulates and self.credit == "none":

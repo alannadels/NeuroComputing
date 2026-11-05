@@ -85,7 +85,8 @@ def main(argv=None) -> int:
     models = [args.baseline, args.ours]
     names = [LABELS.get(m, m.replace("_", "\\_")) for m in models]
     n = O["n_seeds"]
-    setup = (f"{args.dataset}, 784--128--10 LIF network, $T=25$ rate-coded steps, {args.epochs} epochs, "
+    arch = "--".join(str(x) for x in (d.get("arch") or [784, 128, 10]))
+    setup = (f"{args.dataset}, {arch} LIF network, $T=25$ rate-coded steps, {args.epochs} epochs, "
              f"mean $\\pm$ std over {n} seeds; test set evaluated once on the best-validation checkpoint")
     hdr2 = "Metric & " + " & ".join(names)
     col2 = "lcc"
@@ -207,12 +208,14 @@ def main(argv=None) -> int:
         "} \\\\\n\\cmidrule(lr){2-3}\\cmidrule(lr){4-5}\n & Acc. (\\%) & ms / image & Acc. (\\%) & ms / image",
         rows, "lcccc"))
 
-    # 5. per-class
-    rows = []
-    for c in range(len(B["per_class_accuracy"])):
-        rows.append(row(str(c), B['per_class_accuracy'][c], O['per_class_accuracy'][c], "max", pct=True))
-    T.append(table(f"Per-class test accuracy (recall, \\%). {BOLD_NOTE} {setup}.", "tab:ng-per-class",
-                   "Digit & " + " & ".join(names), rows, col2))
+    # 5. per-class (skipped for datasets with more than 10 classes)
+    if len(B["per_class_accuracy"]) <= 10:
+        rows = []
+        for c in range(len(B["per_class_accuracy"])):
+            rows.append(row(str(c), B['per_class_accuracy'][c], O['per_class_accuracy'][c], "max", pct=True))
+        first = "Digit" if args.dataset.upper() in ("MNIST",) else "Class"
+        T.append(table(f"Per-class test accuracy (recall, \\%). {BOLD_NOTE} {setup}.", "tab:ng-per-class",
+                       first + " & " + " & ".join(names), rows, col2))
 
     # 6. explainability
     if "explain" in B and "explain" in O:

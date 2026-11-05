@@ -31,7 +31,9 @@ def _now_stamp() -> str:
 
 
 def _arch_str(cfg) -> str:
-    hidden = tuple(getattr(cfg, "hidden_sizes", ()) or ()) or (cfg.n_hidden,)
+    hidden = tuple(getattr(cfg, "hidden_sizes", ()) or ())
+    if not hidden:
+        hidden = tuple([cfg.n_hidden] * getattr(cfg, "n_hidden_layers", 1))
     return "-".join(str(x) for x in (cfg.n_in, *hidden, cfg.n_out))
 
 

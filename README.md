@@ -156,7 +156,7 @@ model made a single autograd call during training. Expect about 6.5 minutes
 per model per seed on a recent high-end GPU (about 40 minutes for 3 seeds);
 slower GPUs take proportionally longer.
 
-Options: `--dataset mnist|fashion_mnist`, `--epochs N`, `--seeds "..."`,
+Options: `--dataset mnist|fashion_mnist|cifar10|cifar100|tiny_imagenet` (network input and output sizes follow the dataset), `--epochs N`, `--seeds "..."`,
 `--models "bp_snn ng_snn"` (any two of `bp_snn`, `ng_snn`, `three_factor`,
 `tf_div`, `tf_div_energy`, `ng_full_st2`), `--device cuda|mps|cpu`,
 `--out <dir>`, `--first-seed-only`, `--skip-tests`, `--skip-explain`. Anything

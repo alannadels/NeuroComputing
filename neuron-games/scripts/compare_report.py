@@ -503,7 +503,9 @@ def main(argv=None) -> int:
     (root / "comparison.md").write_text("\n".join(L), encoding="utf-8")
     dump = {"summaries": {m: {k: v for k, v in s.items()
                               if k not in ("val_curves", "time_curves")} for m, s in S.items()},
-            "reach": reach_tbl, "paired_test_gap": gap, "no_backprop_audit_pass": nb_ok}
+            "reach": reach_tbl, "paired_test_gap": gap, "no_backprop_audit_pass": nb_ok,
+            # layer sizes, e.g. [784, 128, 10] (from the run's recorded architecture)
+            "arch": [int(x) for x in str(_get(any_res, "meta", "arch") or "fc-784-128-10").split("-")[1:]]}
     (root / "comparison.json").write_text(json.dumps(dump, indent=2, default=str), encoding="utf-8")
     print("\n".join(L))
     return 0 if nb_ok else 2

@@ -23,7 +23,11 @@ Time, energy and memory come from the controlled cost benchmark
 (cost_benchmark.json: same data, interleaved, repeated) when it exists; the
 end-to-end run numbers are kept in the results table for reference.
   explainability  faithfulness margin = acc(remove k random) - acc(remove top-k
-                  credited); positive = faithful; best of the two credit scores (higher)
+                  credited); positive = faithful; best of the credit scores (higher): Eligibility-Shapley,
+                  activity x learning signal (both logged in training), and a post-hoc
+                  activity x exact read-out signal computed the same way for every model.
+                  k = 25% of the hidden layer when the run has the width-scaled curve
+                  (comparable across widths), else k = 64 (older runs)
 """
 from __future__ import annotations
 
@@ -51,6 +55,17 @@ def _margin(faith):
     return faith["random_mean"][-1] - faith["top"][-1]
 
 
+FRACTION_FOR_MARGIN = 0.25
+
+
+def _margin_frac(faith):
+    """Margin at k = 25% of the hidden layer (width-scaled faithfulness curve)."""
+    if not faith or FRACTION_FOR_MARGIN not in faith.get("fractions", []):
+        return None
+    i = faith["fractions"].index(FRACTION_FOR_MARGIN)
+    return faith["random_mean"][i] - faith["top"][i]
+
+
 def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> dict:
     h = res["history"]
     n_ep = max(len(h.get("epoch_val_acc", [])), 1)
@@ -58,6 +73,14 @@ def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> di
     m_shap = _margin(_get(explain, "faithfulness"))
     m_tay = _margin(_get(explain, "taylor", "faithfulness"))
     margins = [m for m in (m_shap, m_tay) if m is not None]
+    f_shap = _margin_frac(_get(explain, "faithfulness_fraction"))
+    f_tay = _margin_frac(_get(explain, "taylor", "faithfulness_fraction"))
+    f_post = _margin_frac(_get(explain, "posthoc", "faithfulness_fraction"))
+    margins_frac = [m for m in (f_shap, f_tay, f_post) if m is not None]
+    rhos = [r for r in (_get(explain, "ablation", "spearman") or {}).values() if r is not None]
+    rf = _get(explain, "faithfulness_fraction")
+    robust = (rf["random_mean"][rf["fractions"].index(FRACTION_FOR_MARGIN)]
+              if rf and FRACTION_FOR_MARGIN in rf.get("fractions", []) else None)
     return {
         "test_acc": res["test"]["accuracy"],
         "best_val_acc": res["best_val_accuracy"],
@@ -77,6 +100,16 @@ def metrics_of(res: dict, explain: dict | None, bench: dict | None = None) -> di
         "faith_margin_shapley": m_shap,
         "faith_margin_taylor": m_tay,
         "faith_margin_best": max(margins) if margins else None,
+        "faith_margin_frac_shapley": f_shap,
+        "faith_margin_frac_taylor": f_tay,
+        "faith_margin_frac_posthoc": f_post,
+        # rank correlation between credit and measured single-neuron removal effect (best credit)
+        "credit_ablation_rho": max(rhos) if rhos else None,
+        # robustness: test accuracy after removing a random 25% of the first hidden layer
+        "acc_random_removal_25": robust,
+        # explainability front: width-scaled margin when available, else the k = 64 one
+        "faith_margin_front": (max(margins_frac) if margins_frac
+                               else (max(margins) if margins else None)),
         "stability_shapley": _get(explain, "stability", "spearman"),
         "stability_taylor": _get(explain, "taylor", "stability", "spearman"),
         "autograd_calls": _get(res, "meta", "autograd_calls_in_training"),
@@ -101,13 +134,15 @@ FRONTS = [
     ("bench_train_mj_step", "min", "energy"),
     ("bench_infer_mj_img", "min", "energy"),
     ("sops_network_per_image", "min", "energy"),
+    ("sops_per_image", "min", "energy"),
     ("bench_train_ms_step", "min", "efficiency"),
     ("bench_train_mem_mib", "min", "efficiency"),
     ("bench_infer_ms_img", "min", "efficiency"),
     ("epochs_to_95", "min", "efficiency"),
-    ("faith_margin_best", "max", "explainability"),
+    ("faith_margin_front", "max", "explainability"),
 ]
 FRONT_LABELS = ["accuracy", "energy: train/step", "energy: infer/img", "energy: network SOPs",
+                "energy: total SOPs",
                 "eff.: train ms/step", "eff.: train memory", "eff.: infer latency",
                 "eff.: epochs to 95%", "explainability"]
 
@@ -211,18 +246,23 @@ def main(batch_dir: Path) -> int:
     L += ["", "## Results\n",
           "| ID | test acc | best val | bal. acc | ECE (ts) | s/epoch | train kJ | peak train MiB | "
           "infer ms/img | SOPs/img (total) | SOPs/img (network) | hidden rate | epochs to 95% | faith. margin Shapley | "
-          "faith. margin act x signal | stability Shapley | stability act x signal | autograd calls |",
-          "|" + "---|" * 18]
+          "faith. margin act x signal | faith. margin 25% Shapley | faith. margin 25% act x signal | "
+          "faith. margin 25% post-hoc | credit-ablation rho | acc. after random 25% removal | "
+          "stability Shapley | stability act x signal | autograd calls |",
+          "|" + "---|" * 23]
     for e in exps:
         m = e["metrics"]
         if not m:
-            L.append(f"| {e['id']} | " + " | ".join(["--"] * 17) + " |")
+            L.append(f"| {e['id']} | " + " | ".join(["--"] * 22) + " |")
             continue
         L.append(f"| {e['id']} | {_f(m['test_acc'])} | {_f(m['best_val_acc'])} | {_f(m['balanced_acc'])} | "
                  f"{_f(m['ece_ts'])} | {_f(m['train_s_per_epoch'], 2)} | {_f(m['train_energy_kj'], 2)} | "
                  f"{_f(m['peak_train_mem_mib'], 1)} | {_f(m['infer_ms_per_image'], 4)} | "
                  f"{_f(m['sops_per_image'], 0)} | {_f(m['sops_network_per_image'], 0)} | {_f(m['hidden_rate'], 3)} | {_f(m['epochs_to_95'])} | "
                  f"{_f(m['faith_margin_shapley'])} | {_f(m['faith_margin_taylor'])} | "
+                 f"{_f(m.get('faith_margin_frac_shapley'))} | {_f(m.get('faith_margin_frac_taylor'))} | "
+                 f"{_f(m.get('faith_margin_frac_posthoc'))} | {_f(m.get('credit_ablation_rho'), 3)} | "
+                 f"{_f(m.get('acc_random_removal_25'))} | "
                  f"{_f(m['stability_shapley'], 3)} | {_f(m['stability_taylor'], 3)} | {_f(m['autograd_calls'])} |")
     # Aggregate runs that share settings (seeds of the same configuration).
     groups: dict[str, list] = {}
@@ -233,21 +273,23 @@ def main(batch_dir: Path) -> int:
     if multi:
         L += ["", "## By settings (mean ± std over seeds)\n",
               "Configurations run on more than one seed, ordered by mean validation accuracy.\n",
-              "| runs | n | val acc | test acc | network SOPs/img | faith. margin (best) | settings |",
-              "|---|---|---|---|---|---|---|"]
+              "| runs | n | val acc | test acc | network SOPs/img | total SOPs/img | faith. margin (front) | settings |",
+              "|---|---|---|---|---|---|---|---|"]
         rows = []
         for k, v in multi.items():
             ms = {key: _mean_std([e["metrics"][key] for e in v])
-                  for key in ("best_val_acc", "test_acc", "sops_network_per_image", "faith_margin_best")}
+                  for key in ("best_val_acc", "test_acc", "sops_network_per_image", "sops_per_image",
+                              "faith_margin_front")}
             rows.append((ms["best_val_acc"][0], v, ms, k))
         for _, v, ms, k in sorted(rows, key=lambda r: -r[0]):
             def ps(pair, d):
                 return "--" if pair[0] is None else f"{pair[0]:.{d}f} ± {pair[1]:.{d}f}"
             L.append(f"| {', '.join(e['id'] for e in v)} | {len(v)} | {ps(ms['best_val_acc'], 4)} | "
                      f"{ps(ms['test_acc'], 4)} | {ps(ms['sops_network_per_image'], 0)} | "
-                     f"{ps(ms['faith_margin_best'], 3)} | `{k}` |")
-    L += ["", "Faithfulness margin = test accuracy after removing 64 random hidden neurons minus after "
-          "removing the 64 top-credited ones (positive = credit is faithful).", "",
+                     f"{ps(ms['sops_per_image'], 0)} | {ps(ms['faith_margin_front'], 3)} | `{k}` |")
+    L += ["", "Faithfulness margin = test accuracy after removing k random hidden neurons minus after "
+          "removing the k top-credited ones (positive = credit is faithful); k = 64, or k = 25% of the "
+          "first hidden layer for the '25%' columns and the explainability front.", "",
           "## Fronts vs reference\n",
           "Each metric compared with the experiment's reference run (win / loss / tie). Benchmark "
           "metrics whose difference is smaller than one standard deviation are 'tie (noise)'.\n",

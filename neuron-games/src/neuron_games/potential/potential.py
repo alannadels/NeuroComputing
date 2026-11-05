@@ -42,7 +42,10 @@ def active_terms(cfg) -> list[tuple[str, float, TermFn]]:
     return terms
 
 
-def evaluate_potential(ctx: TermContext) -> PotentialEval:
+def evaluate_potential(ctx: TermContext, as_tensors: bool = False) -> PotentialEval:
+    """as_tensors=True keeps the logged values (components, info) as device
+    tensors, so the caller can copy them to the host in one transfer."""
+    host = (lambda v: v) if as_tensors else float
     signals = [LayerSignals() for _ in range(ctx.n_layers)]
     out = PotentialEval(signals=signals)
     every = max(int(getattr(ctx.cfg, "diversity_every", 1)), 1)
@@ -58,9 +61,9 @@ def evaluate_potential(ctx: TermContext) -> PotentialEval:
         if len(res.signals) != ctx.n_layers:
             raise ValueError(f"term {name} returned {len(res.signals)} layer signals, "
                              f"expected {ctx.n_layers}")
-        out.components[name] = float(res.value)
+        out.components[name] = host(res.value)
         for k, v in res.info.items():
-            out.info[f"{name}/{k}"] = float(v)
+            out.info[f"{name}/{k}"] = host(v)
         for l in range(ctx.n_layers):
             signals[l] = signals[l] + res.signals[l].scaled(coef)
     return out

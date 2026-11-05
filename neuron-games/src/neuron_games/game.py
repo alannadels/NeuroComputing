@@ -48,6 +48,17 @@ def credit_metric(G: list[torch.Tensor], prev_delta_w: list[torch.Tensor | None]
             for l in range(len(G))]
 
 
+def _to_host(values: dict) -> dict:
+    """Copy every 0-d tensor in `values` to a Python float in one device-to-host
+    transfer (one sync instead of one per value); other values pass through."""
+    keys = [k for k, v in values.items() if torch.is_tensor(v)]
+    out = dict(values)
+    if keys:
+        for k, v in zip(keys, torch.stack([values[k].detach().float().reshape(()) for k in keys]).tolist()):
+            out[k] = v
+    return out
+
+
 def taylor_credit(spk: torch.Tensor, signal: torch.Tensor | None) -> torch.Tensor | None:
     """mean_b |sum_t s_i[t, b] * L_i[t, b]| -> [N_l]. spk, signal: [T, B, N_l]."""
     if signal is None:
@@ -80,7 +91,8 @@ class NeuronGame:
         self.cfg = cfg
         sizes = [layer.fc.out_features for layer in net.layers]
         self.feedback = RandomFeedback(sizes, seed=cfg.seed + cfg.feedback_seed_offset,
-                                       scale=cfg.feedback_scale, device=device)
+                                       scale=cfg.feedback_scale, device=device,
+                                       path=getattr(cfg, "feedback_path", "direct"))
         self.credit = build_credit(cfg)
         self.state = GameState(n_layers=len(net.layers), rate_ema=cfg.rate_ema)
         n = len(net.layers)
@@ -91,12 +103,14 @@ class NeuronGame:
         for p in net.parameters():
             p.requires_grad_(False)
 
-    def task_signals(self, out: torch.Tensor, targets: torch.Tensor) -> list[LayerSignals]:
+    def task_signals(self, out: torch.Tensor, targets: torch.Tensor,
+                     h: list[torch.Tensor] | None = None) -> list[LayerSignals]:
         """Output error dJ/d(out)[t] at the read-out, broadcast to hidden layers.
         Spiking read-out: the error is on the output spikes (spike pathway, x h).
         Leaky read-out: it is on the read-out membrane (membrane pathway, du/dW = eps)."""
         delta = output_error(self.cfg.task_loss, out, targets)
-        hidden = [LayerSignals(spike=s) for s in self.feedback.broadcast(delta)]
+        hidden = [LayerSignals(spike=s) for s in
+                  self.feedback.broadcast(delta, h, normalize=getattr(self.cfg, "feedback_normalize", False))]
         if getattr(self.net, "readout", "spike") == "leaky":
             return hidden + [LayerSignals(mem=delta)]
         return hidden + [LayerSignals(spike=delta)]
@@ -114,20 +128,17 @@ class NeuronGame:
         W = [w.detach() for w in params]
 
         # 1. rollout
-        rec = net(x_seq, record_traces=True)
+        rec = net(x_seq, record_traces=True, trace_mode=getattr(cfg, "trace_mode", "forward"))
 
-        # 2. task signal (J)
-        J = float(self.loss_fn(rec.out, targets))
-        task_sig = self.task_signals(rec.out, targets)
+        # 2. task signal (J); logged scalars stay on the device until the end
+        J = self.loss_fn(rec.out, targets)
+        task_sig = self.task_signals(rec.out, targets, rec.h)
         task_grads = three_factor_grads(rec, task_sig, W)
 
         # 3-4. other potential terms
-        pot = evaluate_potential(TermContext(rec=rec, weights=W, cfg=cfg, epoch=epoch, state=state))
+        pot = evaluate_potential(TermContext(rec=rec, weights=W, cfg=cfg, epoch=epoch, state=state),
+                                 as_tensors=True)
         other_grads = three_factor_grads(rec, pot.signals, W)
-
-        # 5. potential and reward
-        phi = phi_value(J, pot.components, cfg)
-        reward = state.reward(phi)
 
         # 6. credit. phi_i = <G_i, dW_i^(n-1)> (eq. 22) is logged for every
         # condition as a metric, so explainability runs on every model; the
@@ -158,7 +169,16 @@ class NeuronGame:
         if cfg.barrier != "none":
             project_(params, cfg)
         if cfg.feedback == "kolen_pollack":
-            self.feedback.kolen_pollack_(params[-1].data, before[-1], cfg.feedback_decay)
+            if self.feedback.path == "layerwise":     # B_l tracks W_{l+1} for every hidden layer
+                d_hidden = getattr(cfg, "feedback_decay_hidden", -1.0)
+                d_hidden = cfg.feedback_decay if d_hidden < 0 else d_hidden
+                last = len(params) - 1
+                for l in range(last):
+                    self.feedback.kolen_pollack_(params[l + 1].data, before[l + 1],
+                                                 cfg.feedback_decay if l + 1 == last else d_hidden,
+                                                 index=l)
+            else:
+                self.feedback.kolen_pollack_(params[-1].data, before[-1], cfg.feedback_decay)
         if getattr(cfg, "threshold_adapt", False):
             # Homeostatic intrinsic plasticity: move each hidden neuron's threshold
             # toward its target firing rate (local; no gradient).
@@ -171,31 +191,7 @@ class NeuronGame:
         state.update_rates(rec)
         state.window += 1
 
-        # Per-step metrics (acc, rates, grad_norms, update_norms) are tiny GPU
-        # reductions, but each separate float()/`.item()` forces a device→host
-        # sync. On a 128-batch step at T=25 those syncs add ~2 ms on top of the
-        # math itself. Batching them into one .cpu().tolist() cuts 7 (or more at
-        # depth) syncs down to one. metric_sync_batched=False keeps the original
-        # per-metric path for a cost baseline (see experiments/batch_db03).
-        n_rates = len(rec.spk)
-        n_grads = len(grads)
-        if getattr(cfg, "metric_sync_batched", True):
-            acc_t = (spike_count_predictions(rec.out) == targets).float().mean()
-            rates_t = torch.stack([s.mean() for s in rec.spk])
-            grad_norms_t = torch.stack([g.norm() for g in grads])
-            update_norms_t = torch.stack([d.norm() for d in state.prev_delta_w])
-            bundle = torch.cat([acc_t.unsqueeze(0), rates_t, grad_norms_t,
-                                update_norms_t]).detach().cpu().tolist()
-            acc = bundle[0]
-            rates = bundle[1:1 + n_rates]
-            grad_norms = bundle[1 + n_rates:1 + n_rates + n_grads]
-            update_norms = bundle[1 + n_rates + n_grads:]
-        else:
-            acc = float((spike_count_predictions(rec.out) == targets).float().mean())
-            rates = [float(s.mean()) for s in rec.spk]
-            grad_norms = [float(g.norm()) for g in grads]
-            update_norms = [float(d.norm()) for d in state.prev_delta_w]
-
+        acc = (spike_count_predictions(rec.out) == targets).float().mean()
         # Activity x learning-signal credit: |sum_t s_i[t] * L_i[t]| per example,
         # averaged over the batch, with L_i the neuron's own task signal (the
         # random-feedback broadcast). First-order estimate of the task-loss
@@ -203,9 +199,40 @@ class NeuronGame:
         taylor = [taylor_credit(rec.spk[l], task_sig[l].spike)
                   if (self.collect_metrics and l in self.credit_layers) else None
                   for l in range(len(params))]
+        # 5. potential and reward. Per-step metrics (J, acc, potential
+        # components/info, rates, grad_norms, update_norms) are tiny GPU
+        # reductions, but each separate .item() forces a device→host sync. On a
+        # 128-batch step at T=25 those syncs add ~2 ms on top of the math.
+        # metric_sync_batched=True (default) batches every 0-d tensor into one
+        # .cpu() call via _to_host. metric_sync_batched=False restores the
+        # per-metric path as a cost baseline (see experiments/batch_db03).
+        n = len(params)
+        if getattr(cfg, "metric_sync_batched", True):
+            h = _to_host({"J": J, "acc": acc, **{f"c/{k}": v for k, v in pot.components.items()},
+                          **{f"i/{k}": v for k, v in pot.info.items()},
+                          **{f"r{l}": rec.spk[l].mean() for l in range(n)},
+                          **{f"g{l}": grads[l].norm() for l in range(n)},
+                          **{f"u{l}": state.prev_delta_w[l].norm() for l in range(n)}})
+            J = h["J"]
+            components = {k[2:]: v for k, v in h.items() if k.startswith("c/")}
+            info = {k[2:]: v for k, v in h.items() if k.startswith("i/")}
+            acc_v = h["acc"]
+            rates = [h[f"r{l}"] for l in range(n)]
+            grad_norms = [h[f"g{l}"] for l in range(n)]
+            update_norms = [h[f"u{l}"] for l in range(n)]
+        else:
+            J = float(J)
+            components = {k: float(v) if torch.is_tensor(v) else v for k, v in pot.components.items()}
+            info = {k: float(v) if torch.is_tensor(v) else v for k, v in pot.info.items()}
+            acc_v = float(acc)
+            rates = [float(s.mean()) for s in rec.spk]
+            grad_norms = [float(g.norm()) for g in grads]
+            update_norms = [float(d.norm()) for d in state.prev_delta_w]
+        phi = phi_value(J, components, cfg)
+        reward = state.reward(phi)
         return WindowResult(
-            J=J, acc=acc, phi=phi, reward=reward,
-            components={"J": J, **pot.components, **pot.info},
+            J=J, acc=acc_v, phi=phi, reward=reward,
+            components={"J": J, **components, **info},
             rates=rates,
             credit_phi=credit_phi,
             grad_norms=grad_norms,

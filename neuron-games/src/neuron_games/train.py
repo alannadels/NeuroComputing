@@ -23,6 +23,7 @@ Every metric is logged for every learning rule (no model-specific metrics):
 from __future__ import annotations
 
 import dataclasses
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -35,6 +36,7 @@ from .eval import evaluate
 from .game import NeuronGame, credit_metric, taylor_credit
 from .model import build_net
 from .potential.base import TermContext
+from .potential.metabolic import metabolic_value
 from .potential.potential import active_terms, phi_value
 from .potential.task import spike_count_predictions, task_loss
 from .progress import EpochProgress
@@ -69,6 +71,13 @@ class PlateauHalving:
     def step(self, val_acc: float) -> bool:
         """Call once per epoch after validation. Returns True if the LR was cut."""
         if self.cfg.lr_schedule == "none":
+            return False
+        if self.cfg.lr_schedule == "cosine":
+            self.epochs_done = getattr(self, "epochs_done", 0) + 1
+            f, E = self.cfg.lr_min_factor, max(self.cfg.epochs, 1)
+            new = self.cfg.lr * (f + (1.0 - f) * 0.5 * (1.0 + math.cos(math.pi * min(self.epochs_done, E) / E)))
+            for g in self.opt.param_groups:
+                g["lr"] = new
             return False
         if val_acc > self.best:
             self.best, self.bad_epochs = val_acc, 0
@@ -131,6 +140,22 @@ class _EpochLog:
         return out
 
 
+def bptt_objective(rec, targets: torch.Tensor, params: list[torch.Tensor], cfg: NGRunConfig,
+                   loss_fn) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """BPTT training objective: (J + mu * E_met, J, E_met or None).
+
+    With metabolic = "basic", backprop minimizes the same energy E_met (eq. 15:
+    spike, membrane and weight costs, same coefficients) that the three-factor
+    rule pays, here through autograd. This is the spike-count-penalized backprop
+    control used to compare both models at matched sparsity.
+    """
+    J = loss_fn(rec.out, targets)
+    if cfg.metabolic == "none":
+        return J, J, None
+    E = metabolic_value(rec.spk, rec.mem, params, cfg)
+    return J + cfg.mu * E, J, E
+
+
 def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, state: dict,
                           bar: EpochProgress | None = None) -> dict:
     net.train()
@@ -145,10 +170,10 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
         targets = targets.to(device, non_blocking=True)
 
         rec = net(encode(data, cfg.num_steps, cfg.encoding), retain_spike_grads=True)
-        loss = loss_fn(rec.out_spk, targets)
+        objective, loss, E_met = bptt_objective(rec, targets, params, cfg, loss_fn)
 
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        objective.backward()
         with torch.no_grad():
             grads = [p.grad.detach() for p in params]
             credit_phi = credit_metric([-g for g in grads], state["prev_delta_w"], layers)
@@ -162,12 +187,15 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
             state["prev_delta_w"] = [p.detach() - b for p, b in zip(params, before)]
 
         J = float(loss.item())
-        phi = -J                                   # BPTT's potential is the task term alone
+        comps = {"J": J}
+        if E_met is not None:
+            comps["E_met"] = float(E_met.item())
+        phi = -J if E_met is None else -J - cfg.mu * comps["E_met"]   # BPTT's own objective
         reward = None if state["prev_phi"] is None else phi - state["prev_phi"]
         state["prev_phi"] = phi
         acc = float((spike_count_predictions(rec.out_spk) == targets).float().mean().item())
         log.add(loss=J, acc=acc, rates=[float(s.detach().mean().item()) for s in rec.spk],
-                phi=phi, reward=reward, components={"J": J},
+                phi=phi, reward=reward, components=comps,
                 grad_norms=[float(g.norm()) for g in grads],
                 update_norms=[float(d.norm()) for d in state["prev_delta_w"]],
                 credit_phi=credit_phi, taylor=taylor)
@@ -201,7 +229,7 @@ def reference_phi_cfg(cfg: NGRunConfig) -> NGRunConfig:
     p = CONDITION_PRESETS["ng_full"]
     return dataclasses.replace(cfg, learning_rule="three_factor", optimizer="sgd", bias=False,
                                credit="none", credit_modulates=False, rate_floor=0.0,
-                               diversity_every=1,
+                               diversity_every=1, trace_mode="forward",
                                diversity=p["diversity"], metabolic=p["metabolic"],
                                barrier=p["barrier"])
 
