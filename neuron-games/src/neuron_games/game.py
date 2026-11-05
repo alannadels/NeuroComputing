@@ -199,24 +199,44 @@ class NeuronGame:
         taylor = [taylor_credit(rec.spk[l], task_sig[l].spike)
                   if (self.collect_metrics and l in self.credit_layers) else None
                   for l in range(len(params))]
-        # 5. potential and reward; every logged scalar copied to the host at once
+        # 5. potential and reward. Per-step metrics (J, acc, potential
+        # components/info, rates, grad_norms, update_norms) are tiny GPU
+        # reductions, but each separate .item() forces a device→host sync. On a
+        # 128-batch step at T=25 those syncs add ~2 ms on top of the math.
+        # metric_sync_batched=True (default) batches every 0-d tensor into one
+        # .cpu() call via _to_host. metric_sync_batched=False restores the
+        # per-metric path as a cost baseline (see experiments/batch_db03).
         n = len(params)
-        h = _to_host({"J": J, "acc": acc, **{f"c/{k}": v for k, v in pot.components.items()},
-                      **{f"i/{k}": v for k, v in pot.info.items()},
-                      **{f"r{l}": rec.spk[l].mean() for l in range(n)},
-                      **{f"g{l}": grads[l].norm() for l in range(n)},
-                      **{f"u{l}": state.prev_delta_w[l].norm() for l in range(n)}})
-        J = h["J"]
-        components = {k[2:]: v for k, v in h.items() if k.startswith("c/")}
+        if getattr(cfg, "metric_sync_batched", True):
+            h = _to_host({"J": J, "acc": acc, **{f"c/{k}": v for k, v in pot.components.items()},
+                          **{f"i/{k}": v for k, v in pot.info.items()},
+                          **{f"r{l}": rec.spk[l].mean() for l in range(n)},
+                          **{f"g{l}": grads[l].norm() for l in range(n)},
+                          **{f"u{l}": state.prev_delta_w[l].norm() for l in range(n)}})
+            J = h["J"]
+            components = {k[2:]: v for k, v in h.items() if k.startswith("c/")}
+            info = {k[2:]: v for k, v in h.items() if k.startswith("i/")}
+            acc_v = h["acc"]
+            rates = [h[f"r{l}"] for l in range(n)]
+            grad_norms = [h[f"g{l}"] for l in range(n)]
+            update_norms = [h[f"u{l}"] for l in range(n)]
+        else:
+            J = float(J)
+            components = {k: float(v) if torch.is_tensor(v) else v for k, v in pot.components.items()}
+            info = {k: float(v) if torch.is_tensor(v) else v for k, v in pot.info.items()}
+            acc_v = float(acc)
+            rates = [float(s.mean()) for s in rec.spk]
+            grad_norms = [float(g.norm()) for g in grads]
+            update_norms = [float(d.norm()) for d in state.prev_delta_w]
         phi = phi_value(J, components, cfg)
         reward = state.reward(phi)
         return WindowResult(
-            J=J, acc=h["acc"], phi=phi, reward=reward,
-            components={"J": J, **components, **{k[2:]: v for k, v in h.items() if k.startswith("i/")}},
-            rates=[h[f"r{l}"] for l in range(n)],
+            J=J, acc=acc_v, phi=phi, reward=reward,
+            components={"J": J, **components, **info},
+            rates=rates,
             credit_phi=credit_phi,
-            grad_norms=[h[f"g{l}"] for l in range(n)],
-            update_norms=[h[f"u{l}"] for l in range(n)],
+            grad_norms=grad_norms,
+            update_norms=update_norms,
             taylor_credit=taylor,
             feedback_alignment=self.feedback.alignment(params[-1]) if self.collect_metrics else None,
         )

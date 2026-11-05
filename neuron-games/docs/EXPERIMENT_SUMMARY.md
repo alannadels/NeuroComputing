@@ -1,4 +1,4 @@
-# Experiment summary (batches 01-09, five-dataset overview, jh01-jh02; 2026-10-21 to 2026-11-03)
+# Experiment summary (batches 01-09 + db01-db03 + jh01-jh02, five-dataset overview; 2026-10-21 to 2026-11-03)
 
 What has been tried so far for the no-backprop method, what worked, what did
 not, and what is still open. Read this before designing new experiments so
@@ -81,6 +81,8 @@ Superseded by the five-dataset overview above; kept for the record of how each f
 | ours, best, 1024 hidden | 98.03 +- 0.06% | 14,621 | +0.01 | 9.7 |
 | backprop, T = 10 | 97.72 +- 0.04% | 5,689 | +0.03 | 3.5 |
 | ours, best, T = 10 | 97.21 +- 0.24% | 2,166 | +0.44 | 5.7 |
+| backprop, 2 x 128 hidden | 97.92 +- 0.16% | 121,899 | +0.22 | 23.7 |
+| ours, 2 x 128 hidden (`threshold_target=0.08`) | 97.49 +- 0.20% | 87,213 | +0.22 | 32.1 |
 
 Network SOPs = synaptic operations per test image caused by hidden and output
 spikes (input spikes are identical for every model). Faithfulness margin =
@@ -186,6 +188,8 @@ backprop and is withdrawn.
 | lr 0.1 instead of 0.2 on Fashion-MNIST | +0.33 pt val, positive on all 3 seeds, +16% network SOPs | jh01 |
 | KP decay 3e-4 instead of 1e-3 on Fashion-MNIST | +0.15 pt val (positive on all 3 seeds), +0.42 pt test; weaker decay also halves the late drift (see the KP note above) | jh02 |
 | rate floor + adaptive thresholds on Fashion-MNIST | removing both costs -1.9 pt val / -2.4 pt test (no effect on MNIST); hidden firing falls to 2.6% | jh01 |
+| `threshold_target=0.08` at 2 x 128 hidden (MNIST) | depth-matched gap -0.91 pt -> -0.43 pt, 29% fewer SOPs, faithfulness recovers to bp parity. Depth-specific; do not apply at 1 x 128 | db02b |
+| sync-batched metric reductions (`metric_sync_batched=true`) | ~28% faster real-loop s/epoch, bitwise-identical model. No learning-rule change | db03 |
 
 The energy weight `mu` is an accuracy-sparsity dial, not an accuracy lever
 (3 seeds, 128 hidden, no floor):
@@ -226,6 +230,8 @@ neurons).
 | three hidden layers on Fashion-MNIST / CIFAR-10 (layer-wise KP, normalized) | -1.9 / -4.1 pt vs backprop; the first layer stays dense, as on MNIST | overnight |
 | `mu` as a sparsity dial on Fashion-MNIST | weaker than on MNIST: `mu=5e-6` cuts network SOPs 13% (MNIST 45%) for -0.4 pt val; `mu=2.5e-5` cuts 42% for -1.1 pt val (1 seed each) | jh01 |
 | within noise (single seed): lr 0.1 / 0.3 / 0.5, momentum 0.8 / 0.95, KP decay 3e-4, feedback scale 0.5 / 2, barrier weight 1e-3 / 0.1, surrogate slope 5 / 10 / 40, LR patience 3 / 10, membrane time constant 5 / 20 steps, batch 64, adaptive-threshold target 2-5% | no reliable change | 02, 03, 05 |
+| `threshold_target` sweep at T=10 (0.02 / 0.08 vs 0.05) | all three tie by validation (within 0.01 pt); mean test deltas +0.10/+0.11 pt within noise. Set-point is not the T=10 bottleneck | db01c |
+| `threshold_target=0.02` at 2 x 128 hidden | counter-intuitive: lower target produces HIGHER hidden rate (0.30 -> 0.35), -0.22 pt test, 19% more SOPs, worse faithfulness. The threshold servo at depth is sign-flipped from the naive reading | db02b |
 
 ## Open problems and untried directions
 
@@ -238,7 +244,11 @@ neurons).
 1. **Depth.** Two hidden layers trail backprop by 0.3-1.4 pt, three by 1.9-4.1
    pt (MNIST, Fashion-MNIST, CIFAR-10): the per-layer normalization of the
    chained feedback signal compounds and over-drives the first layer, which
-   stays dense. Needs a fix before larger or convolutional networks.
+   stays dense. At 2 x 128 on MNIST, raising `threshold_target` to 0.08 closes
+   the depth-matched gap from -0.91 pt to -0.43 pt and recovers a 29% SOP
+   advantage (db02b); the remaining -0.43 pt looks like a credit-flow problem
+   (current Kolen-Pollack feeds only the last hidden layer). Next: `db02c`
+   broadcasts KP to every hidden layer; `db02d` adds per-layer `threshold_target`.
 2. **Credit quality.** Credit vs single-neuron removal: ours ahead on MNIST
    (0.85 vs 0.59) and CIFAR-100 (0.94 vs 0.91), behind on Fashion-MNIST,
    CIFAR-10 and Tiny ImageNet (0.76-0.88 vs 0.91-0.95). Not yet diagnosed.
@@ -248,14 +258,40 @@ neurons).
 4. **Cost at large inputs.** On Tiny ImageNet (12,288 inputs) the input layer
    dominates both models: our step is only 6-15% faster and training energy is
    tied. Peak training memory is +3-18% on every dataset.
-5. **Width.** Ties backprop at 512 / 1024 on Fashion-MNIST and at 512 on
-   CIFAR-10; -1.1 pt at 1024 on CIFAR-10.
-6. **Reverse-time traces** (`trace_mode=reverse`, less memory, same gradients)
+5. **Training cost — real loop.** Partially closed in db03: sync-batching metric
+   reductions drops real-loop s/epoch ~28% (bitwise-identical model). The
+   T-independent kernel-launch overhead is still there under the covers
+   (`cost_benchmark.py` sees ~1% delta from the patch because it preloads data
+   and skips end-of-step bookkeeping). Next: profile where the remaining ~4 s
+   per real epoch goes (`db03b`); candidate target is kernel fusion in
+   `potential/*`.
+6. **Width.** Ties backprop at 512 / 1024 on Fashion-MNIST and at 512 on
+   CIFAR-10; -1.1 pt at 1024 on CIFAR-10. Faithfulness test still removes a
+   fixed 64 hidden neurons; switch to a fixed fraction so it stays meaningful
+   at 1024 hidden.
+7. **Short windows (T).** db01c ruled `threshold_target` out as the cause of the
+   T = 10 gap (all three settings tie on validation). The sweet-spot at T = 25
+   that doesn't carry down to T = 10 is now more consistent with a feedback-
+   alignment mismatch (Kolen-Pollack decay) than a homeostatic one. Next:
+   `db01d` sweeps `feedback_decay` at T = 10. Also: `threshold_target=0.02`
+   at T = 10 improves faithfulness from 0.47 to 0.52 at no accuracy cost —
+   an explainability-focused variant for the paper narrative.
+8. **Fair energy comparison.** Backprop has no sparsity pressure. A backprop
+   run with a spike-count penalty, swept, would put both models on one
+   accuracy vs SOPs curve.
+9. **Reverse-time traces** (`trace_mode=reverse`, less memory, same gradients)
    are used for the sparse configuration; not adopted for the dense one until
    a larger seed comparison.
-7. **ImageNet-1k / convolutional layers.** The rule has no convolutional layers
-   yet (weight sharing needs an extension of the eligibility traces and of
-   Kolen-Pollack). Required for competitive ImageNet-scale results.
+10. **ImageNet-1k / convolutional layers.** The rule has no convolutional layers
+    yet (weight sharing needs an extension of the eligibility traces and of
+    Kolen-Pollack). Required for competitive ImageNet-scale results.
+11. **Environment reproducibility.** On Windows + WDDM, a sleep/wake event can
+    degrade the GPU driver state and cause a 10-15x per-epoch slowdown on an
+    individual run (observed in db01c on first launch and once in db02b/db03
+    mid-batch). The slowdown does not change model output (seeds are
+    deterministic), so disregard these as wall-clock outliers rather than
+    model variance. If reproducing a batch, keep the machine awake for the
+    full duration.
 
 
 ## Experiment protocol

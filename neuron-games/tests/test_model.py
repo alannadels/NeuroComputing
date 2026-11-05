@@ -196,3 +196,52 @@ def test_config_round_trip(tmp_path) -> None:
 def test_config_rejects_unknown_condition() -> None:
     with pytest.raises(ValueError):
         NGRunConfig(condition="not_a_condition")
+
+
+# --- multi-hidden network -----------------------------------------------------
+
+def test_fcsnn_hidden_sizes_builds_the_requested_depth() -> None:
+    net = FCSNN(n_in=12, hidden_sizes=(9, 7), n_out=4)
+    assert net.hidden_sizes == (9, 7)
+    # [12 -> 9, 9 -> 7, 7 -> 4]: two hidden LIF layers plus one output layer.
+    assert [layer.fc.in_features for layer in net.layers] == [12, 9, 7]
+    assert [layer.fc.out_features for layer in net.layers] == [9, 7, 4]
+    assert all(layer.spiking for layer in net.layers[:-1])
+    # Output layer stays spiking by default (readout="spike").
+    assert net.layers[-1].spiking is True
+
+
+def test_fcsnn_hidden_sizes_leaky_readout_switches_only_output() -> None:
+    net = FCSNN(n_in=12, hidden_sizes=(9, 7), n_out=4, readout="leaky",
+                adaptive_threshold=True)
+    assert [layer.spiking for layer in net.layers] == [True, True, False]
+    # Adaptive thresholds live on hidden layers only, never the output.
+    assert all(layer.adaptive_threshold for layer in net.layers[:-1])
+    assert net.layers[-1].adaptive_threshold is False
+
+
+def test_fcsnn_hidden_sizes_forward_shape() -> None:
+    net = FCSNN(n_in=12, hidden_sizes=(9, 7), n_out=4, alpha=math.exp(-0.1),
+                readout="leaky")
+    x = (torch.rand(6, 5, 12) < 0.3).float()  # T, B, n_in
+    rec = net(x, record_traces=True)
+    assert len(net.weights) == 3
+    assert rec.spk[0].shape == (6, 5, 9)
+    assert rec.spk[1].shape == (6, 5, 7)
+    assert rec.mem[-1].shape == (6, 5, 4)
+    assert rec.eps is not None and len(rec.eps) == 3
+
+
+def test_fcsnn_default_single_hidden_matches_legacy_signature() -> None:
+    # Existing callers that pass n_hidden alone still get a one-hidden network.
+    net = FCSNN(n_in=12, n_hidden=9, n_out=4)
+    assert net.hidden_sizes == (9,)
+    assert len(net.layers) == 2
+
+
+def test_build_net_passes_hidden_sizes_from_config() -> None:
+    cfg = NGRunConfig.for_condition("three_factor", n_in=12, n_hidden=9, n_out=4,
+                                    hidden_sizes=(9, 7), device="cpu")
+    net = build_net(cfg)
+    assert net.hidden_sizes == (9, 7)
+    assert [layer.fc.out_features for layer in net.layers] == [9, 7, 4]
