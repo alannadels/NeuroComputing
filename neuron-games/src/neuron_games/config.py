@@ -99,6 +99,12 @@ class NGRunConfig:
                                           # (aliases: mnist, fashion_mnist, cifar10, cifar100, tiny_imagenet)
     num_steps: int = 25                   # T: one adaptation window = one presentation
     encoding: str = "rate"                # rate (Bernoulli) | direct (same pixels each step)
+    # CIFAR-only preprocessing (ignored on MNIST / Fashion-MNIST / TinyImageNet).
+    # Augmentation applies to the training split only; validation and test use
+    # the clean transform. Normalization applies to all splits and requires
+    # encoding=direct (rate encoding needs pixel values in [0, 1]).
+    augment: bool = False                 # RandomCrop(32, padding=4) + RandomHorizontalFlip on train
+    normalize: bool = False               # per-channel mean/std; requires encoding=direct
     task_loss: str = "ce_rate"            # ce_rate (mean_t CE on spk[t]) | ce_count (CE on spike counts)
 
     # --- Learning rule ---
@@ -231,6 +237,11 @@ class NGRunConfig:
         if self.condition not in CONDITIONS:
             raise ValueError(f"unknown condition {self.condition!r}; known: {sorted(CONDITIONS)}")
         _check("encoding", self.encoding, ("rate", "direct"))
+        if self.normalize and self.encoding != "direct":
+            raise ValueError("normalize=True requires encoding=direct; rate encoding "
+                             "needs pixel values in [0, 1]")
+        if (self.augment or self.normalize) and self.dataset not in ("CIFAR10", "CIFAR100"):
+            raise ValueError(f"augment / normalize are CIFAR-only; got dataset {self.dataset!r}")
         _check("task_loss", self.task_loss, ("ce_rate", "ce_count"))
         _check("learning_rule", self.learning_rule, LEARNING_RULES)
         _check("optimizer", self.optimizer, OPTIMIZERS)

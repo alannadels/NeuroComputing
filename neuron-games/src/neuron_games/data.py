@@ -8,10 +8,16 @@ through `neuron_baseline.data.build_loaders` unmodified; every other dataset
 reuses the same seeded train/val split and loader settings, so all are
 measured identically.
 
-Every image arrives in [0, 1], as rate coding needs (pixel = spike
-probability). For CIFAR this means ToTensor only: no per-channel mean/std
-normalization (it would produce negative values) and no augmentation, so the
-input path is the same as MNIST's.
+Every image arrives in [0, 1] by default, as rate coding needs (pixel =
+spike probability). For CIFAR this means ToTensor only: the input path is
+the same as MNIST's. Two opt-in preprocessing knobs on NGRunConfig lift
+that default for CIFAR-10/100:
+- `augment=True`: RandomCrop(32, padding=4) + RandomHorizontalFlip on the
+  training split only; val / test still see clean images.
+- `normalize=True` (requires `encoding=direct`): per-channel mean/std
+  standardization with the standard CIFAR stats. Produces negative
+  values, which is why it is gated on direct encoding (rate encoding
+  needs [0, 1] inputs).
 
 Tiny ImageNet (Stanford CS231n release): its test labels are not public, so,
 as is standard, the official 10,000-image validation set serves as our test
@@ -39,6 +45,27 @@ DATASETS = {"MNIST": datasets.MNIST, "FashionMNIST": datasets.FashionMNIST,
             "CIFAR10": datasets.CIFAR10, "CIFAR100": datasets.CIFAR100}
 TRANSFORMS = {"FashionMNIST": TUTORIAL_TRANSFORM,
               "CIFAR10": transforms.ToTensor(), "CIFAR100": transforms.ToTensor()}
+
+# Standard per-channel mean/std (computed over the respective training split).
+CIFAR_STATS = {
+    "CIFAR10": ((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+    "CIFAR100": ((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2762)),
+}
+
+
+def _cifar_transform(name: str, *, augment: bool, normalize: bool, train: bool):
+    """CIFAR-10/100 transform. Augmentation applies on the train split only;
+    normalization applies to all splits (requires encoding=direct, checked in
+    NGRunConfig)."""
+    ts = []
+    if train and augment:
+        ts.append(transforms.RandomCrop(32, padding=4))
+        ts.append(transforms.RandomHorizontalFlip())
+    ts.append(transforms.ToTensor())
+    if normalize:
+        mean, std = CIFAR_STATS[name]
+        ts.append(transforms.Normalize(mean, std))
+    return transforms.Compose(ts)
 
 
 TINY_URL = "http://cs231n.stanford.edu/tiny-imagenet-200.zip"
@@ -90,7 +117,8 @@ class TinyImageNet(Dataset):
 
 def build_loaders(dataset: str, data_dir: str | Path, batch_size: int, eval_batch_size: int,
                   val_size: int, seed: int, num_workers: int = 0, pin_memory: bool = True,
-                  download: bool = True) -> dict[str, DataLoader]:
+                  download: bool = True, augment: bool = False,
+                  normalize: bool = False) -> dict[str, DataLoader]:
     name = canonical_dataset(dataset)
     if name == "MNIST":
         return _mnist_loaders(data_dir, batch_size, eval_batch_size, val_size, seed,
@@ -100,11 +128,20 @@ def build_loaders(dataset: str, data_dir: str | Path, batch_size: int, eval_batc
     data_dir.mkdir(parents=True, exist_ok=True)
     if name == "TinyImageNet":
         full_train = TinyImageNet(data_dir, "train", download=download)
+        full_train_eval = full_train
         test_ds = TinyImageNet(data_dir, "val", download=download)
+    elif name in ("CIFAR10", "CIFAR100"):
+        ds = DATASETS[name]
+        tf_train = _cifar_transform(name, augment=augment, normalize=normalize, train=True)
+        tf_eval = _cifar_transform(name, augment=False, normalize=normalize, train=False)
+        full_train = ds(str(data_dir), train=True, download=download, transform=tf_train)
+        full_train_eval = ds(str(data_dir), train=True, download=download, transform=tf_eval)
+        test_ds = ds(str(data_dir), train=False, download=download, transform=tf_eval)
     else:
         ds = DATASETS[name]
         tf = TRANSFORMS[name]
         full_train = ds(str(data_dir), train=True, download=download, transform=tf)
+        full_train_eval = full_train
         test_ds = ds(str(data_dir), train=False, download=download, transform=tf)
     train_idx, val_idx = _split_indices(len(full_train), val_size, seed)
     train_gen = torch.Generator().manual_seed(seed + 1)
@@ -112,7 +149,7 @@ def build_loaders(dataset: str, data_dir: str | Path, batch_size: int, eval_batc
         "train": DataLoader(Subset(full_train, train_idx), batch_size=batch_size, shuffle=True,
                             drop_last=True, num_workers=num_workers, pin_memory=pin_memory,
                             generator=train_gen),
-        "val": DataLoader(Subset(full_train, val_idx), batch_size=eval_batch_size, shuffle=False,
+        "val": DataLoader(Subset(full_train_eval, val_idx), batch_size=eval_batch_size, shuffle=False,
                           drop_last=False, num_workers=num_workers, pin_memory=pin_memory),
         "test": DataLoader(test_ds, batch_size=eval_batch_size, shuffle=False, drop_last=False,
                            num_workers=num_workers, pin_memory=pin_memory),
@@ -124,4 +161,6 @@ def loaders_for(cfg, pin_memory: bool | None = None) -> dict[str, DataLoader]:
         pin_memory = cfg.device.startswith("cuda")
     return build_loaders(cfg.dataset, cfg.data_dir, cfg.batch_size, cfg.eval_batch_size,
                          cfg.val_size, cfg.seed, num_workers=cfg.num_workers,
-                         pin_memory=pin_memory)
+                         pin_memory=pin_memory,
+                         augment=getattr(cfg, "augment", False),
+                         normalize=getattr(cfg, "normalize", False))
