@@ -2,7 +2,11 @@
 
 Usage (from neuron-games/):
     python scripts/cost_benchmark.py experiments/batch_NN [--steps 200] [--repeats 5]
-        [--infer-batches 20] [--infer-passes 10] [--warmup 10]
+        [--infer-batches 20] [--infer-passes 10] [--warmup 10] [--batch-size 256]
+
+--batch-size overrides the training batch size of the first experiment's
+configuration for every experiment (default: keep it), so batches trained at
+different sizes can be compared at one size.
 
 End-to-end training wall times vary by 10-15% between runs of the same model
 (GPU temperature, clocks, run order), which is larger than many real
@@ -17,7 +21,8 @@ same conditions instead:
 - per repeat: synchronized wall time, GPU energy (NVML) and peak memory.
 
 Training cost is one full training step of the model's own learning rule
-(forward + update; the BPTT model includes its backward pass), with per-step
+(forward + update; the BPTT model includes its backward pass, and its
+mu * E_met penalty when its configuration has metabolic != "none"), with per-step
 logging metrics (credit scores, feedback alignment) switched off for both. Inference cost
 is the forward pass with spike-count prediction on test batches, repeated
 --infer-passes times so each measurement window lasts over a second: the GPU
@@ -46,6 +51,7 @@ from neuron_games.data import loaders_for  # noqa: E402
 from neuron_games.encoding import encode  # noqa: E402
 from neuron_games.game import NeuronGame  # noqa: E402
 from neuron_games.model import build_net  # noqa: E402
+from neuron_games.potential.metabolic import metabolic_value  # noqa: E402
 from neuron_games.potential.task import spike_count_predictions, task_loss  # noqa: E402
 from neuron_games.timing import peak_memory_mib, reset_peak_memory, synced_time  # noqa: E402
 from neuron_games.train import build_optimizer  # noqa: E402
@@ -76,10 +82,13 @@ def _train_stepper(cfg, net, device):
         game = NeuronGame(net, cfg, device, collect_metrics=False)
         return lambda x, y: game.step(encode(x, cfg.num_steps, cfg.encoding), y, opt)
     loss_fn = task_loss(cfg.task_loss)
+    weights = [layer.fc.weight for layer in net.layers]
 
     def step(x, y):
         rec = net(encode(x, cfg.num_steps, cfg.encoding))
         loss = loss_fn(rec.out, y)
+        if cfg.metabolic != "none":
+            loss = loss + cfg.mu * metabolic_value(rec.spk, rec.mem, weights, cfg)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
@@ -114,6 +123,8 @@ def main(argv=None) -> int:
     p.add_argument("--infer-passes", type=int, default=10)
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--device", default="cuda")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="training batch size for every experiment (default: from config.json)")
     args = p.parse_args(argv)
 
     exps = sorted(d for d in args.batch_dir.iterdir()
@@ -128,6 +139,8 @@ def main(argv=None) -> int:
     # Same data for every experiment, preloaded on the device.
     cfg0 = NGRunConfig.load(exps[0] / "config.json")
     cfg0.device = str(device)
+    if args.batch_size is not None:
+        cfg0.batch_size = args.batch_size
     loaders = loaders_for(cfg0, pin_memory=False)
     train_batches, test_batches = [], []
     for i, (x, y) in enumerate(loaders["train"]):

@@ -219,10 +219,12 @@ class NGRunConfig:
         _check("feedback", self.feedback, ("random", "kolen_pollack"))
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
-        if self.learning_rule == "bptt" and (self.diversity != "none" or self.metabolic != "none"
+        # BPTT may add the metabolic cost mu * E_met to its loss (the "backprop +
+        # energy" comparison); the other terms are wired into three_factor only.
+        if self.learning_rule == "bptt" and (self.diversity != "none"
                                              or self.barrier != "none" or self.credit != "none"
                                              or self.rate_floor > 0.0 or self.threshold_adapt):
-            raise ValueError("V / E / credit terms are only wired into the three_factor rule")
+            raise ValueError("V / E_bar / credit terms are only wired into the three_factor rule")
         if self.threshold_adapt and self.diversity != "none" and self.diversity_feature == "plasticity_signature":
             raise ValueError("plasticity_signature diversity assumes a fixed threshold")
         if self.credit_modulates and self.credit == "none":

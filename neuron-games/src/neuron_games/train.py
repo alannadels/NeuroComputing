@@ -10,7 +10,8 @@ on val accuracy, `last.pt` always.
 
 Every metric is logged for every learning rule (no model-specific metrics):
 - per batch: loss, accuracy, firing rates, the model's own potential Phi and
-  reward r = Phi_n - Phi_{n-1} (for BPTT the objective is J alone, so Phi = -J),
+  reward r = Phi_n - Phi_{n-1} (for BPTT the objective is J, plus mu * E_met
+  when cfg.metabolic != "none", so Phi = -J - mu * E_met),
   ||gradient|| and ||applied update|| per layer, and Eligibility-Shapley credit
   phi_i = <G_i, dW_i^(n-1)> with G the negative gradient of the model's own
   objective (for BPTT: the backprop gradient it already computed; for the
@@ -35,6 +36,7 @@ from .eval import evaluate
 from .game import NeuronGame, credit_metric, taylor_credit
 from .model import build_net
 from .potential.base import TermContext
+from .potential.metabolic import metabolic_value
 from .potential.potential import active_terms, phi_value
 from .potential.task import spike_count_predictions, task_loss
 from .progress import EpochProgress
@@ -146,9 +148,13 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
 
         rec = net(encode(data, cfg.num_steps, cfg.encoding), retain_spike_grads=True)
         loss = loss_fn(rec.out_spk, targets)
+        objective = loss
+        if cfg.metabolic != "none":
+            E_met = metabolic_value(rec.spk, rec.mem, params, cfg)
+            objective = loss + cfg.mu * E_met
 
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        objective.backward()
         with torch.no_grad():
             grads = [p.grad.detach() for p in params]
             credit_phi = credit_metric([-g for g in grads], state["prev_delta_w"], layers)
@@ -162,12 +168,15 @@ def _train_one_epoch_bptt(net, loader, optimizer, cfg: NGRunConfig, device, stat
             state["prev_delta_w"] = [p.detach() - b for p, b in zip(params, before)]
 
         J = float(loss.item())
-        phi = -J                                   # BPTT's potential is the task term alone
+        components = {"J": J}
+        if cfg.metabolic != "none":
+            components["E_met"] = float(E_met.item())
+        phi = -float(objective.item())             # BPTT's potential: minus its own objective
         reward = None if state["prev_phi"] is None else phi - state["prev_phi"]
         state["prev_phi"] = phi
         acc = float((spike_count_predictions(rec.out_spk) == targets).float().mean().item())
         log.add(loss=J, acc=acc, rates=[float(s.detach().mean().item()) for s in rec.spk],
-                phi=phi, reward=reward, components={"J": J},
+                phi=phi, reward=reward, components=components,
                 grad_norms=[float(g.norm()) for g in grads],
                 update_norms=[float(d.norm()) for d in state["prev_delta_w"]],
                 credit_phi=credit_phi, taylor=taylor)
