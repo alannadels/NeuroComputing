@@ -18,7 +18,8 @@ BP=(--model bp_snn --set readout=leaky --set optimizer=adam --set batch_size=256
 # More patient learning-rate schedule for the longer budget, same for both models.
 SCHED=(--set lr_patience=10)
 
-SEEDS=(1 2 3 4 5)
+# EXP_SEEDS="2 3" runs a subset, so several Slurm jobs can share the batch.
+SEEDS=(${EXP_SEEDS:-1 2 3 4 5})
 # dataset:learning rate of ours (five-dataset protocol)
 DATASETS=(cifar100:0.05 tiny_imagenet:0.02)
 

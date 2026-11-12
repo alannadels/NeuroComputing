@@ -15,7 +15,8 @@ OURS=(--model tf_div_energy --set diversity=none --set mu=0 --set momentum=0.9
       --set batch_size=256)
 BP=(--model bp_snn --set readout=leaky --set optimizer=adam --set batch_size=256 --set lr=1e-3)
 
-SEEDS=(1 2 3 4 5)
+# EXP_SEEDS="2 3" runs a subset, so several Slurm jobs can share the batch.
+SEEDS=(${EXP_SEEDS:-1 2 3 4 5})
 DATASETS=(fashion_mnist:0.1 cifar10:0.02)
 DECAYS=(1e-4 3e-4)
 SCALINGS=(none lr)

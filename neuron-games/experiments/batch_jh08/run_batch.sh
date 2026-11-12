@@ -14,7 +14,8 @@ OURS=(--model tf_div_energy --set diversity=none --set mu=0 --set momentum=0.9
       --set batch_size=256 --set lr=0.02)
 BP=(--model bp_snn --set readout=leaky --set optimizer=adam --set batch_size=256 --set lr=1e-3)
 
-SEEDS=(1 2 3 4 5)
+# EXP_SEEDS="2 3" runs a subset, so several Slurm jobs can share the batch.
+SEEDS=(${EXP_SEEDS:-1 2 3 4 5})
 # Cell A: augmentation only (rate encoding, as in the five-dataset protocol).
 CELL_A=(--set augment=true)
 # Cell B: augmentation + per-channel normalization (requires direct encoding).
