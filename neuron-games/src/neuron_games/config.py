@@ -121,6 +121,8 @@ class NGRunConfig:
     feedback_decay_hidden: float = -1.0   # layerwise + kolen_pollack: decay for the hidden pairs
                                           # (B_l, W_{l+1}), l < last; < 0 = same as feedback_decay.
                                           # 0: B_l only accumulates W_{l+1}'s updates, W_{l+1} never decays
+    feedback_decay_scaling: str = "none"  # none: constant decay | lr: decay * (current lr / initial lr),
+                                          # so the decay follows the learning-rate schedule
     trace_mode: str = "forward"           # forward: store eligibility traces eps | reverse: same
                                           # update from the stored inputs (learning_rule.reverse_filter),
                                           # no eps buffers (less memory)
@@ -169,6 +171,7 @@ class NGRunConfig:
     threshold_adapt: bool = False
     threshold_eta: float = 0.05
     threshold_target: float = 0.03
+    threshold_target_layer0: float = -1.0 # first hidden layer only; < 0 = same as threshold_target
     threshold_min: float = 0.1
     threshold_max: float = 5.0
 
@@ -186,6 +189,7 @@ class NGRunConfig:
     # --- Optimization ---
     optimizer: str = "adam"               # sgd matches eq. 3 (dW = eta * int m e dt); adam for BPTT
     lr: float = 1e-3
+    lr_layer0_mult: float = 1.0           # learning rate of the first layer's weights = lr * this
     momentum: float = 0.0                 # sgd only
     # LR schedule, identical for every model: halve the learning rate once val
     # accuracy has gone lr_patience epochs without a new best (counter then
@@ -259,6 +263,9 @@ class NGRunConfig:
         if self.trace_mode == "reverse" and self.diversity != "none":
             raise ValueError("diversity V reads the eligibility traces; use trace_mode=forward")
         _check("lr_schedule", self.lr_schedule, ("plateau", "cosine", "none"))
+        _check("feedback_decay_scaling", self.feedback_decay_scaling, ("none", "lr"))
+        if self.lr_layer0_mult <= 0.0:
+            raise ValueError("lr_layer0_mult must be > 0")
         if self.learning_rule == "three_factor" and self.bias:
             raise ValueError("three_factor assumes bias=False: every parameter is a synapse w_ij")
         if self.learning_rule == "bptt" and (self.diversity != "none"

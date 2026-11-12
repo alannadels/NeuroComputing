@@ -169,23 +169,32 @@ class NeuronGame:
         if cfg.barrier != "none":
             project_(params, cfg)
         if cfg.feedback == "kolen_pollack":
+            # feedback_decay_scaling=lr: the decay follows the learning-rate schedule
+            # (group 0 holds every weight except possibly the first layer's).
+            scale = 1.0
+            if getattr(cfg, "feedback_decay_scaling", "none") == "lr":
+                g0 = optimizer.param_groups[0]
+                scale = g0["lr"] / g0.get("initial_lr", cfg.lr)
             if self.feedback.path == "layerwise":     # B_l tracks W_{l+1} for every hidden layer
                 d_hidden = getattr(cfg, "feedback_decay_hidden", -1.0)
                 d_hidden = cfg.feedback_decay if d_hidden < 0 else d_hidden
                 last = len(params) - 1
                 for l in range(last):
                     self.feedback.kolen_pollack_(params[l + 1].data, before[l + 1],
-                                                 cfg.feedback_decay if l + 1 == last else d_hidden,
+                                                 scale * (cfg.feedback_decay if l + 1 == last else d_hidden),
                                                  index=l)
             else:
-                self.feedback.kolen_pollack_(params[-1].data, before[-1], cfg.feedback_decay)
+                self.feedback.kolen_pollack_(params[-1].data, before[-1], scale * cfg.feedback_decay)
         if getattr(cfg, "threshold_adapt", False):
             # Homeostatic intrinsic plasticity: move each hidden neuron's threshold
             # toward its target firing rate (local; no gradient).
             for l, layer in enumerate(net.layers[:-1]):
                 if layer.adaptive_threshold:
                     rate = rec.spk[l].mean(dim=(0, 1))
-                    layer.theta.add_(cfg.threshold_eta * (rate - cfg.threshold_target)).clamp_(
+                    target = cfg.threshold_target
+                    if l == 0 and getattr(cfg, "threshold_target_layer0", -1.0) >= 0:
+                        target = cfg.threshold_target_layer0
+                    layer.theta.add_(cfg.threshold_eta * (rate - target)).clamp_(
                         cfg.threshold_min, cfg.threshold_max)
         state.prev_delta_w = [w.detach() - b for w, b in zip(params, before)]
         state.update_rates(rec)

@@ -44,10 +44,23 @@ from .timing import peak_memory_mib, reset_peak_memory, synced_time
 
 
 def build_optimizer(net, cfg: NGRunConfig) -> torch.optim.Optimizer:
+    """One param group at cfg.lr; with lr_layer0_mult != 1 a second group holds the
+    first layer's parameters at cfg.lr * lr_layer0_mult. Group 0 always holds the
+    rest (the output layer included). Every group records its initial_lr."""
+    mult = getattr(cfg, "lr_layer0_mult", 1.0)
+    if mult == 1.0:
+        groups = [{"params": list(net.parameters()), "lr": cfg.lr}]
+    else:
+        first = list(net.layers[0].parameters())
+        ids = {id(p) for p in first}
+        groups = [{"params": [p for p in net.parameters() if id(p) not in ids], "lr": cfg.lr},
+                  {"params": first, "lr": cfg.lr * mult}]
+    for g in groups:
+        g["initial_lr"] = g["lr"]
     if cfg.optimizer == "sgd":
-        return torch.optim.SGD(net.parameters(), lr=cfg.lr, momentum=cfg.momentum)
+        return torch.optim.SGD(groups, lr=cfg.lr, momentum=cfg.momentum)
     if cfg.optimizer == "adam":
-        return torch.optim.Adam(net.parameters(), lr=cfg.lr, betas=cfg.adam_betas)
+        return torch.optim.Adam(groups, lr=cfg.lr, betas=cfg.adam_betas)
     raise ValueError(f"unknown optimizer {cfg.optimizer!r}")
 
 
@@ -75,9 +88,9 @@ class PlateauHalving:
         if self.cfg.lr_schedule == "cosine":
             self.epochs_done = getattr(self, "epochs_done", 0) + 1
             f, E = self.cfg.lr_min_factor, max(self.cfg.epochs, 1)
-            new = self.cfg.lr * (f + (1.0 - f) * 0.5 * (1.0 + math.cos(math.pi * min(self.epochs_done, E) / E)))
+            frac = f + (1.0 - f) * 0.5 * (1.0 + math.cos(math.pi * min(self.epochs_done, E) / E))
             for g in self.opt.param_groups:
-                g["lr"] = new
+                g["lr"] = g.get("initial_lr", self.cfg.lr) * frac
             return False
         if val_acc > self.best:
             self.best, self.bad_epochs = val_acc, 0
@@ -86,7 +99,8 @@ class PlateauHalving:
         if self.bad_epochs < self.cfg.lr_patience or self.lr <= self.min_lr:
             return False
         for g in self.opt.param_groups:
-            g["lr"] = max(g["lr"] * self.cfg.lr_factor, self.min_lr)
+            floor = g.get("initial_lr", self.cfg.lr) * self.cfg.lr_min_factor
+            g["lr"] = max(g["lr"] * self.cfg.lr_factor, floor)
         self.bad_epochs = 0
         self.reductions += 1
         return True
