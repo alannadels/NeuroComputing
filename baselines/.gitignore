@@ -1,0 +1,39 @@
+# Datasets
+data/
+datasets/
+
+# Experiment outputs
+results/
+results-100ep/
+results-50ep/
+results-converge/
+outputs/
+logs/
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Python temporary files
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# SLURM output files
+slurm-*.out
+slurm-*.err

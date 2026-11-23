@@ -8,6 +8,14 @@ sub-project's Config (5000, 20260923).
 CIFAR-10 / CIFAR-100 added: RGB 32x32 images, per-channel normalization,
 train-only augmentation (random crop + horizontal flip). The validation split
 is taken from the training set but always uses the un-augmented transform.
+
+Fashion-MNIST uses the same grayscale 28x28 transform as MNIST (no augmentation).
+
+ImageNet60: a 60-class ImageNet subset read from image folders (not downloadable):
+    <data_dir>/imagenet60/train/<class>/*.JPEG
+    <data_dir>/imagenet60/val/<class>/*.JPEG     (used as the test set;
+                                                  a test/ folder wins if present)
+Images are resized to 64x64 RGB, ImageNet mean/std, crop + flip augmentation.
 """
 from __future__ import annotations
 
@@ -17,6 +25,31 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
+
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+class ImageNet60(datasets.ImageFolder):
+    """ImageFolder with the torchvision (root, train, download, transform) signature."""
+
+    folder = "imagenet60"
+    num_classes = 60
+
+    def __init__(self, root, train: bool = True, download: bool = False, transform=None):
+        base = Path(root) / self.folder
+        split = "train" if train else ("test" if (base / "test").is_dir() else "val")
+        if not (base / split).is_dir():
+            raise FileNotFoundError(
+                f"{base / split} not found. ImageNet60 cannot be downloaded automatically; "
+                f"place it as {base}/train/<class>/... and {base}/val/<class>/...")
+        super().__init__(str(base / split), transform=transform)
+        if len(self.classes) != self.num_classes:
+            raise ValueError(f"{base / split} has {len(self.classes)} class folders, "
+                             f"expected {self.num_classes}")
+
+
+GRAYSCALE_DATASETS = ("mnist", "fashion_mnist")
 
 TUTORIAL_TRANSFORM = transforms.Compose([
     transforms.Resize((28, 28)),
@@ -29,6 +62,9 @@ DATASETS = {
     "mnist": {
         "cls": datasets.MNIST, "in_channels": 1, "image_size": 28, "num_classes": 10,
     },
+    "fashion_mnist": {
+        "cls": datasets.FashionMNIST, "in_channels": 1, "image_size": 28, "num_classes": 10,
+    },
     "cifar10": {
         "cls": datasets.CIFAR10, "in_channels": 3, "image_size": 32, "num_classes": 10,
         "mean": (0.4914, 0.4822, 0.4465), "std": (0.2470, 0.2435, 0.2616),
@@ -36,6 +72,10 @@ DATASETS = {
     "cifar100": {
         "cls": datasets.CIFAR100, "in_channels": 3, "image_size": 32, "num_classes": 100,
         "mean": (0.5071, 0.4865, 0.4409), "std": (0.2673, 0.2564, 0.2762),
+    },
+    "imagenet60": {
+        "cls": ImageNet60, "in_channels": 3, "image_size": 64, "num_classes": 60,
+        "mean": IMAGENET_MEAN, "std": IMAGENET_STD, "resize": True, "pad": 8,
     },
 }
 
@@ -46,15 +86,18 @@ def dataset_info(name: str) -> dict:
 
 
 def build_transforms(name: str, augment: bool = True):
-    if name == "mnist":
+    if name in GRAYSCALE_DATASETS:
         return TUTORIAL_TRANSFORM, TUTORIAL_TRANSFORM
     info = DATASETS[name]
     normalize = transforms.Normalize(info["mean"], info["std"])
-    eval_tf = transforms.Compose([transforms.ToTensor(), normalize])
+    # Folder datasets (ImageNet60) have variable-size images: resize first.
+    pre = [transforms.Resize((info["image_size"], info["image_size"]))] if info.get("resize") else []
+    eval_tf = transforms.Compose([*pre, transforms.ToTensor(), normalize])
     if not augment:
         return eval_tf, eval_tf
     train_tf = transforms.Compose([
-        transforms.RandomCrop(info["image_size"], padding=4),
+        *pre,
+        transforms.RandomCrop(info["image_size"], padding=info.get("pad", 4)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize,
