@@ -1,5 +1,5 @@
-"""Download MNIST, Fashion-MNIST, CIFAR-10 and CIFAR-100 into --data-dir, once,
-with internet, and check that ImageNet60 is in place.
+"""Download MNIST, Fashion-MNIST, CIFAR-10, CIFAR-100 and Multi30k (English-German
+translation) into --data-dir, once, with internet, and check that ImageNet60 is in place.
 
 Run this on a node that HAS internet (e.g. a PACE login node) before submitting
 an offline GPU job. The training runs can then use --no-download and read the
@@ -15,6 +15,8 @@ from pathlib import Path
 
 from torchvision import datasets
 
+from common.text_data import MULTI30K_SIZES, download_multi30k
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -25,6 +27,9 @@ def main() -> None:
         for train in (True, False):
             cls(args.data_dir, train=train, download=True)
         print(f"[ok] {name} ready in {args.data_dir}/")
+
+    root = download_multi30k(args.data_dir)
+    print(f"[ok] Multi30k ready in {root}/ (pairs: {MULTI30K_SIZES})")
 
     base = Path(args.data_dir) / "imagenet60"
     test_split = "test" if (base / "test").is_dir() else "val"

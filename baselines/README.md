@@ -12,6 +12,7 @@ Data split is shared with `snn-surrogate-baseline/` (see `common/data.py`).
 | --- | --- |
 | `run.py` | Entry point: pick model, seed, config |
 | `common/data.py` | MNIST, CIFAR-10 and CIFAR-100 loaders (MNIST path copied from `snn-surrogate-baseline`) |
+| `common/text_data.py` | Multi30k English-German translation loader (word-level vocabularies, padded batches for an encoder-decoder Transformer) |
 | `common/train.py` | Shared train/eval loop for backprop models |
 | `common/nonbp.py` | Shared fit/eval helpers for non-backprop models |
 | `models/` | One file per architecture |
@@ -112,6 +113,47 @@ pass (same convention as the backprop models), and record diagnostics
 > ART is O(samples × categories) and slow on full data (hours). `run_all_baselines.sh`
 > caps it at `ART_SUBSET=15000` by default; override with `ART_SUBSET=0` for all
 > data. SOM is now fast (batched) and uses all data by default.
+
+### Multi30k translation data
+
+`common/text_data.py` loads Multi30k task 1 (29,000 train / 1,014 validation /
+1,000 test sentence pairs, English to German by default). It is independent of
+`run.py`, which only handles image classification. The data is cached in
+`<data-dir>/multi30k/` by `prefetch_data.py`; check it with
+
+```
+python -m common.text_data --data-dir data --no-download
+```
+
+```python
+from common.text_data import build_multi30k_loaders, PAD_ID, BOS_ID, EOS_ID
+
+loaders, vocabs = build_multi30k_loaders("data", batch_size=128, eval_batch_size=256,
+                                         seed=0, download=False)
+for batch in loaders["train"]:
+    batch["src"], batch["tgt_in"], batch["tgt_out"]          # (B, S), (B, T), (B, T) token ids
+    batch["src_pad_mask"], batch["tgt_pad_mask"]            # True at padding
+    # nn.Transformer(batch_first=True): pass src_pad_mask as both src_key_padding_mask and
+    # memory_key_padding_mask; causal mask: torch.triu(torch.ones(T, T, dtype=torch.bool), 1)
+```
+
+- Vocabularies are built from the training split only; tokens seen fewer than
+  `min_freq=2` times map to `<unk>`. `max_vocab` caps the size (for example 2000).
+- Special ids: `<pad>`=0, `<unk>`=1, `<bos>`=2, `<eos>`=3. Use
+  `CrossEntropyLoss(ignore_index=PAD_ID)` on `tgt_out`.
+- `max_len` (optional) caps training sequence length including `<bos>`/`<eos>`;
+  validation and test are never truncated.
+- BLEU: tokens are lowercased, so do not score against the raw references. Use
+  `refs = loaders["test"].dataset.references()`, hypotheses
+  `" ".join(vocabs["tgt"].decode(ids))` (in test-loader order, or reorder with
+  `batch["index"]`), and `sacrebleu.corpus_bleu(hyps, [refs], tokenize="none")`.
+  Report it as tokenized, lowercased BLEU. `<unk>` tokens are left in the
+  hypotheses and count as misses. Greedy decoding needs a length limit
+  (for example source length + 50).
+
+Note: `models/transformer.py` is a Vision Transformer image classifier. Training
+on Multi30k needs an encoder-decoder model (for example `torch.nn.Transformer`)
+that consumes these batches.
 
 ### Adding a model
 
