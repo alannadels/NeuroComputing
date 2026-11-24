@@ -4,6 +4,7 @@
 !**/data/**/.gitkeep
 # snn-surrogate-baseline uses `data/` directly as the torchvision MNIST download dir
 snn-surrogate-baseline/data/
+baselines/data/
 
 # Results / run outputs
 **/results/*

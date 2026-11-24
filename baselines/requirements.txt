@@ -1,0 +1,7 @@
+# Versions match snn-surrogate-baseline so all baselines share one stack.
+# On NVIDIA Blackwell GPUs install the cu128 wheels:
+#   uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+#       "torch==2.11.0" "torchvision==0.26.0"
+# On macOS / CPU the default PyPI wheels work.
+torch==2.11.0
+torchvision==0.26.0
