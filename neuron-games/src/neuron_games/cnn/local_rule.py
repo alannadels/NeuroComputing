@@ -83,6 +83,17 @@ def conv_weight_update_unfold(x: torch.Tensor, sig: torch.Tensor, m: nn.Conv2d) 
     return g.view(m.weight.shape)
 
 
+def maxpool_route(sig: torch.Tensor, idx: torch.Tensor, in_hw) -> torch.Tensor:
+    """Send each pooled signal back to the input position that was the max.
+    Sums when overlapping windows picked the same position (max_unpool2d would
+    overwrite instead)."""
+    n, c = sig.shape[:2]
+    h, w = in_hw
+    out = sig.new_zeros(n, c, h * w)
+    out.scatter_add_(2, idx.flatten(2), sig.flatten(2))
+    return out.view(n, c, h, w)
+
+
 def conv_feedback(sig: torch.Tensor, B: torch.Tensor, m: nn.Conv2d, in_shape) -> torch.Tensor:
     """Signal for the layer below: transposed conv of sig with feedback kernel B."""
     h_in, w_in = in_shape[-2:]
@@ -261,7 +272,7 @@ class LocalRule:
                 sig = g_in
             elif isinstance(m, nn.MaxPool2d):
                 idx, size = s
-                sig = F.max_unpool2d(sig, idx, m.kernel_size, m.stride, m.padding, output_size=size)
+                sig = maxpool_route(sig, idx, size)
             elif isinstance(m, nn.Flatten):
                 sig = sig.view(s)
         energy = self.mu * float(activity) if activity is not None else 0.0

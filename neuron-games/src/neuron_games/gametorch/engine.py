@@ -76,6 +76,9 @@ class GameTorch:
         self._saved, self._activity = [None] * len(self.mods), None
         return GameLoss(self, logits, targets, saved, activity)
 
+    def _run_rule(self, logits, saved, targets, activity) -> int:
+        return self.rule.compute_grads(logits, saved, targets, activity, keep=self.keep)["kept"]
+
     # ---------------------------------------------------------------- KP
     def _pre_step(self, opt, args, kwargs):
         self._before = self.rule.snapshot()
@@ -106,9 +109,7 @@ class GameLoss:
     def backward(self) -> None:
         if self._saved is None:
             raise RuntimeError("backward() already called for this loss")
-        out = self.gt.rule.compute_grads(self.logits, self._saved, self.targets, self._activity,
-                                         keep=self.gt.keep)
-        self.kept = out["kept"]
+        self.kept = self.gt._run_rule(self.logits, self._saved, self.targets, self._activity)
         self._saved = None
 
     def item(self) -> float:
@@ -121,5 +122,15 @@ class GameLoss:
         return float(self.value)
 
 
-def attach(model: nn.Sequential, optimizer: torch.optim.Optimizer | None = None, **kw) -> GameTorch:
+def attach(model: nn.Module, optimizer: torch.optim.Optimizer | None = None, graph: bool | None = None,
+           **kw):
+    """nn.Sequential -> the chain engine; anything else (or graph=True) -> the torch.fx
+    graph engine (residual adds, reused modules, functional flatten)."""
+    if graph is None:
+        graph = not isinstance(model, nn.Sequential)
+    if graph:
+        from .graph import GraphGameTorch
+        kw.pop("path", None)
+        kw.pop("trainable", None)
+        return GraphGameTorch(model, optimizer, **kw)
     return GameTorch(model, optimizer, **kw)
